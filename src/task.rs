@@ -32,3 +32,23 @@ pub struct TaskEvent {
     created_at: DateTime<Utc>,
     task_id: Uuid,
 }
+
+pub struct Config {
+    /// Name of the task.
+    name: String,
+    attach_stdin: bool,
+    attach_stdout: bool,
+    attach_stderr: bool,
+    /// Command to run inside the container.
+    command: Vec<String>,
+    /// The image that will be run as a container.
+    image: String,
+    /// How much memory the container will need.
+    memory: usize,
+    /// How much disk space the container will need.
+    disk: usize,
+    /// Key value pairs to pass to the container as env variables.
+    env_variables: Vec<String>,
+    /// When the container should be restarted.
+    restart_policy: String,
+}

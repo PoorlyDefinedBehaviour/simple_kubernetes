@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 chrono = "0.4.23"
 uuid = { version = "1.2.2", features = ["v4"] }
+docker-api = { version = "0.12", default-features = false }
