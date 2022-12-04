@@ -3,6 +3,9 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+pub type TaskId = Uuid;
+pub type TaskName = String;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum State {
     Pending,
@@ -13,8 +16,8 @@ pub enum State {
 }
 
 pub struct Task {
-    id: Uuid,
-    name: String,
+    id: TaskId,
+    name: TaskName,
     state: State,
     image: String,
     memory: usize,

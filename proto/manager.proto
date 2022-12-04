@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package manager;
+
+service Manager {
+  rpc RegisterWorker (RegisterWorkerRequest) returns (RegisterWorkerReply) {}
+}
+
+message RegisterWorkerRequest {
+  string worker_id = 1;
+  string worker_addr = 2;
+}
+
+message RegisterWorkerReply {
+
+}
