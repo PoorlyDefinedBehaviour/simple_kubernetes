@@ -1,0 +1,5 @@
+id: e5041cbc-a18f-45a1-84bf-243c826c95a6
+heartbeat:
+  interval: 5
+manager:
+  addr: "::1"

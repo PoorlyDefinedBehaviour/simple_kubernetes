@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::{
     definition::Definition,
@@ -22,7 +22,7 @@ pub enum CandidateSelectionError {
 }
 
 #[async_trait]
-pub trait Scheduler {
+pub trait Scheduler: Send + Sync {
     async fn select_candidate_nodes(
         &self,
         input: &CandidateSelectionInput,

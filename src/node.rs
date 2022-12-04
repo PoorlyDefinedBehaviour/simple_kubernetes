@@ -1,18 +1,47 @@
-use std::net::Ipv6Addr;
+use anyhow::Result;
+
+use sysinfo::{System, SystemExt};
 
 /// Represents a physical machine used to run tasks.
 #[derive(Debug)]
 pub struct Node {
+    sys: System,
+}
+
+impl Node {
+    pub fn new() -> Self {
+        Self {
+            sys: System::new_all(),
+        }
+    }
+
     /// The name of the node.
-    name: String,
+    pub fn hostname() -> Result<String> {
+        todo!()
+    }
+
     /// The ip address of the node.
-    ip: Ipv6Addr,
+    pub fn ip() -> Result<String> {
+        todo!()
+    }
+
     /// The amount of memory available.
-    max_memory: usize,
+    pub fn max_memory() -> Result<String> {
+        todo!()
+    }
+
     /// The amount of memory allocated.
-    memory_allocated: usize,
+    pub fn memory_allocated() -> Result<String> {
+        todo!()
+    }
+
     /// The disk size available.
-    max_disk_size: usize,
+    pub fn max_disk_size() -> Result<String> {
+        todo!()
+    }
+
     /// The disk size allocated.
-    disk_allocated: usize,
+    pub fn disk_allocated() -> Result<String> {
+        todo!()
+    }
 }

@@ -9,3 +9,5 @@ pub mod worker;
 
 #[cfg(test)]
 mod definition_test;
+#[cfg(test)]
+mod worker_test;

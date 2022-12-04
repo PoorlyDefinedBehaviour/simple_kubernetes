@@ -1,6 +1,9 @@
+use std::{net::SocketAddr, path::Path};
+
 use anyhow::Result;
 use docker_api::{opts::PullOpts, Docker};
 use futures_util::stream::StreamExt;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{definition::Definition, node::Node};
@@ -17,13 +20,53 @@ pub struct Worker {
     docker_client: Docker,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    pub id: WorkerId,
+    pub manager: ManagerConfig,
+    pub heartbeat: HeartbeatConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ManagerConfig {
+    pub addr: SocketAddr,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HeartbeatConfig {
+    pub interval: u64,
+}
+
+impl Config {
+    #[tracing::instrument(name = "worker::Config::from_file", skip_all, fields(
+        file_path = ?file_path.as_ref()
+    ))]
+    pub async fn from_file(file_path: impl AsRef<Path>) -> Result<Self> {
+        let file_contents = tokio::fs::read_to_string(file_path.as_ref()).await?;
+
+        let config: Config = serde_yaml::from_str(&file_contents)?;
+
+        Ok(config)
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RunTaskError {
     #[error("error pulling image: {0:?}")]
     PullError(String),
 }
 
 impl Worker {
+    #[tracing::instrument(name = "Worker::new", skip_all, fields(
+        config = ?config
+    ))]
+    pub fn new(config: Config) -> Result<Self> {
+        Ok(Self {
+            id: config.id,
+            node: Node::new(),
+            docker_client: Docker::new("unix:///var/run/docker.sock")?,
+        })
+    }
     pub fn collect_stats(&mut self) {
         todo!()
     }
