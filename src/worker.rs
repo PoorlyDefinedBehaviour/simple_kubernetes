@@ -81,11 +81,14 @@ impl Worker {
         config = ?config
     ))]
     pub async fn start(config: Config) -> Result<()> {
-        let etcd = Client::connect(ClientConfig::new([
-            "http://127.0.0.1:2379".into(),
-            "http://127.0.0.1:2380".into(),
-        ]))
-        .await?;
+        let etcd_endpoints: Vec<_> = config
+            .etcd
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.into())
+            .collect();
+
+        let etcd = Client::connect(ClientConfig::new(etcd_endpoints)).await?;
 
         info!("connected to etcd");
 
