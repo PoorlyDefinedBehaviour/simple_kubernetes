@@ -17,8 +17,10 @@ mod config_from_file_tests {
             &mut file,
             r#"
 id: "63483d5c-ac50-411c-9771-b5689578e2bf"
+etcd:
+  endpoints: ["http://127.0.0.1:12379"]
 heartbeat:
-  interval: 5
+  interval: 5          
 manager:
   addr: "::1"
 "#
@@ -36,6 +38,8 @@ manager:
             &mut file,
             r#"
 id: "63483d5c-ac50-411c-9771-b5689578e2bf"
+etcd:
+  endpoints: ["http://127.0.0.1:12379"]    
 heartbeat:
   interval: 5
 manager:

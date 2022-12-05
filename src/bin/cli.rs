@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use simple_kubernetes::{
-    definition::Definition, manager::Manager, simple_scheduler::SimpleScheduler,
+    definition::Definition,
+    manager::{Config, Manager},
+    simple_scheduler::SimpleScheduler,
 };
 
 #[derive(Debug, Parser)]
@@ -26,7 +28,11 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let mut manager = Manager::new(Box::new(SimpleScheduler::new()));
+    let mut manager = Manager::new(
+        Config::from_file("manager.yml".to_owned()).await?,
+        Box::new(SimpleScheduler::new()),
+    )
+    .await?;
 
     match cli.command {
         Commands::Apply { file } => {

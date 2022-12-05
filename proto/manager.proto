@@ -8,7 +8,6 @@ service Manager {
 
 message RegisterWorkerRequest {
   string worker_id = 1;
-  string worker_addr = 2;
 }
 
 message RegisterWorkerReply {

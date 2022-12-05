@@ -1,0 +1,2 @@
+worker:
+  heartbeat_timeout: 15

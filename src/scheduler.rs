@@ -1,15 +1,12 @@
 use std::collections::HashMap;
 
-use crate::{
-    definition::Definition,
-    worker::{Worker, WorkerId},
-};
+use crate::{definition::Definition, manager::RemoteWorker, worker::WorkerId};
 use async_trait::async_trait;
 
 #[derive(Debug)]
 pub struct CandidateSelectionInput<'a> {
     pub definition: &'a Definition,
-    pub workers: &'a HashMap<WorkerId, Worker>,
+    pub workers: &'a HashMap<WorkerId, RemoteWorker>,
 }
 
 #[derive(Debug, thiserror::Error)]

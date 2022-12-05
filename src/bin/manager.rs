@@ -2,15 +2,35 @@ pub mod manager_proto {
     tonic::include_proto!("manager");
 }
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use manager_proto::{RegisterWorkerReply, RegisterWorkerRequest};
 use simple_kubernetes::{
-    manager::{Manager, RemoteWorker},
+    manager::{Manager, RemoteWorker, Config},
     simple_scheduler::SimpleScheduler,
 };
-use std::{net::SocketAddr, str::FromStr};
+use tokio::time::Instant;
+
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{error, info, Level};
 use uuid::Uuid;
+
+#[derive(Debug, Parser)]
+#[command(author, version, about, long_about = None)]
+#[command(propagate_version = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Start the manager and configure it using a config file.
+    Config {
+        /// Path to the config file.
+        #[arg(short)]
+        file: String,
+    },
+}
 
 pub struct ManagerService {
     manager: Manager,
@@ -28,7 +48,7 @@ impl TryFrom<RegisterWorkerRequest> for RemoteWorker {
     fn try_from(input: RegisterWorkerRequest) -> Result<RemoteWorker> {
         Ok(RemoteWorker {
             worker_id: Uuid::parse_str(&input.worker_id)?,
-            worker_addr: SocketAddr::from_str(&input.worker_addr)?,
+            heartbeat_received_at: Instant::now(),
         })
     }
 }
@@ -71,16 +91,25 @@ impl manager_proto::manager_server::Manager for ManagerService {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
-    let addr = "[::1]:50051".parse().unwrap();
+    let cli = Cli::parse();
 
-    info!(addr = ?addr, "starting manager server");
+    match cli.command {
+        Commands::Config { file } => {
+            let addr = "[::1]:50051".parse().unwrap();
 
-    let manager = Manager::new(Box::new(SimpleScheduler::new()));
-    let svc = manager_proto::manager_server::ManagerServer::new(ManagerService::new(manager));
+            info!(addr = ?addr, "starting manager server");
 
-    Server::builder().add_service(svc).serve(addr).await?;
+            let manager = Manager::new(
+                Config::from_file(file).await?,
+                Box::new(SimpleScheduler::new()),
+            )
+            .await?;
+            let svc =
+                manager_proto::manager_server::ManagerServer::new(ManagerService::new(manager));
 
-    // TODO: register workers so the manager knows which workers are alive.
+            Server::builder().add_service(svc).serve(addr).await?;
+        }
+    }
 
     Ok(())
 }

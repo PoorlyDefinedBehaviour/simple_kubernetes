@@ -1,9 +1,9 @@
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path};
 
 /// The resource definition used in apply -f <FILE>
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Definition {
     #[serde(rename = "apiVersion")]
     api_version: String,
@@ -11,26 +11,26 @@ pub struct Definition {
     spec: Spec,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Spec {
     containers: Vec<Container>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Container {
     image: String,
     name: String,
     ports: Vec<Port>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Port {
     #[serde(rename = "containerPort")]
     container_port: u16,
     protocol: String,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DefinitionError {
     #[error("field {0} is required")]
     MissingField(String),
