@@ -95,7 +95,7 @@ impl Manager {
     #[tracing::instrument(name = "Manager::apply", skip_all, fields(
       definition = ?definition
     ))]
-    pub async fn apply(&mut self, definition: Definition) -> Result<()> {
+    pub async fn apply(&self, definition: Definition) -> Result<()> {
         let mut workers = self.workers.lock().await;
 
         // Remove workers that haven't sent a heartbeat in a while because they may be dead.
@@ -115,6 +115,8 @@ impl Manager {
         for worker_id in workers_to_remove {
             workers.remove(&worker_id);
         }
+
+        dbg!(&workers);
 
         let candidate_nodes = self
             .scheduler

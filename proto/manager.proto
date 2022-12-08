@@ -4,6 +4,7 @@ package manager;
 
 service Manager {
   rpc RegisterWorker (RegisterWorkerRequest) returns (RegisterWorkerReply) {}
+  rpc Apply (ApplyRequest) returns (ApplyReply) {}
 }
 
 message RegisterWorkerRequest {
@@ -11,5 +12,13 @@ message RegisterWorkerRequest {
 }
 
 message RegisterWorkerReply {
+
+}
+
+message ApplyRequest {
+  string body = 1;
+}
+
+message ApplyReply {
 
 }

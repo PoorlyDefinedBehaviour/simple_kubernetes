@@ -1,18 +1,19 @@
-use std::{net::SocketAddr, path::Path, time::Duration};
+use std::{net::SocketAddr, path::Path, str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::Result;
-use docker_api::{opts::PullOpts, Docker};
-use etcd_rs::{
-    Client, ClientConfig, ClusterOp, KeyRange, KeyValueOp, MemberAddRequest, PutRequest,
-    WatchInbound, WatchOp,
+use docker_api::{
+    opts::{ContainerCreateOpts, PublishPort, PullOpts},
+    Docker,
 };
+use etcd_rs::{Client, ClientConfig, KeyRange, WatchOp};
 use futures_util::stream::StreamExt;
 use serde::Deserialize;
-use tokio::select;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::{definition::Definition, node::Node, worker::manager_proto::RegisterWorkerRequest};
+use crate::{definition::Definition, list_watcher::ListWatcher, node::Node, work_queue::WorkQueue};
+
+use self::manager_proto::RegisterWorkerRequest;
 
 pub type WorkerId = Uuid;
 
@@ -28,6 +29,8 @@ pub struct Worker {
     config: Config,
     /// The node that the worker is running on.
     node: Node,
+    /// The current definition being used to run containers in this node.
+    current_state: Option<Definition>,
     /// Client used to communicate with the docker daemon.
     docker_client: Docker,
     /// Client used to communicate with etcd.
@@ -76,6 +79,34 @@ pub enum RunTaskError {
     PullError(String),
 }
 
+#[tracing::instrument(name = "worker::heartbeat", skip_all, fields(
+    worker_id = %worker_id,
+    manager_endpoint = %manager_endpoint
+))]
+async fn heartbeat(worker_id: WorkerId, manager_endpoint: String, heartbeat_interval: Duration) {
+    loop {
+        // TODO: do not recreate client
+        match manager_proto::manager_client::ManagerClient::connect(manager_endpoint.clone()).await
+        {
+            Err(error) => {
+                warn!(?error, "unable to connect to manager");
+            }
+            Ok(mut client) => {
+                if let Err(error) = client
+                    .register_worker(RegisterWorkerRequest {
+                        worker_id: worker_id.to_string(),
+                    })
+                    .await
+                {
+                    error!(?error, "unable to register worker");
+                }
+            }
+        };
+
+        tokio::time::sleep(heartbeat_interval).await;
+    }
+}
+
 impl Worker {
     #[tracing::instrument(name = "Worker::start", skip_all, fields(
         config = ?config
@@ -95,78 +126,94 @@ impl Worker {
         let worker = Self {
             config,
             node: Node::new(),
+            current_state: None,
             docker_client: Docker::new("unix:///var/run/docker.sock")?,
             etcd,
         };
 
+        info!("spawning heartbeat control loop");
+        tokio::spawn(heartbeat(
+            worker.config.id,
+            format!("http://{}", worker.config.manager.addr),
+            Duration::from_secs(worker.config.heartbeat.interval),
+        ));
+
+        info!("spawning worker control loop");
         tokio::spawn(worker.watch_cluster_state_changes());
 
         Ok(())
     }
 
     #[tracing::instrument(name = "Worker::watch_cluster_state_changes", skip_all)]
-    async fn watch_cluster_state_changes(self) {
-        let (mut stream, _cancel) = self
-            .etcd
-            .watch(KeyRange::prefix(self.config.id.to_string()))
-            .await
-            .expect("watch by prefix");
-
-        info!("watching changes prefixed by worker id");
-
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
-
-        let manager_endpoint = format!("http://{}", self.config.manager.addr);
+    async fn watch_cluster_state_changes(mut self) {
+        // The desired state for this node. Changes to the desired state are
+        // appended to the work queue before being processed.
+        let work_queue: Arc<WorkQueue<Definition>> = Arc::new(WorkQueue::new());
+        let list_watcher = ListWatcher::new(
+            // TODO: make configurable
+            Duration::from_secs(30),
+            Arc::clone(&work_queue),
+            self.etcd.clone(),
+        );
 
         let current_state_key = format!("node/{}/current_state", self.config.id);
 
-        loop {
-            select! {
-                inbound = stream.inbound() => match inbound {
-                    WatchInbound::Ready(resp) => {
-                        println!("receive event: {:?}", resp);
+        info!(?current_state_key, "spawning list watcher");
+        tokio::spawn(list_watcher.list_and_watch(current_state_key));
 
-                        if let Err(error) = self.etcd.put(PutRequest::new(current_state_key.clone(), "test")).await {
-                          error!(?error, "unable to set current state");
-                      }
-                    }
-                    WatchInbound::Interrupted(e) => {
-                        eprintln!("encounter error: {:?}", e);
-                        break;
-                    }
-                    WatchInbound::Closed => {
-                        info!("watch stream closed");
-                        break;
-                    }
-                },
-                _ = interval.tick() => {
-                    // TODO: do not recreate client
-                    match manager_proto::manager_client::ManagerClient::connect(manager_endpoint.clone()).await {
-                        Err(error) => {
-                           warn!(?error, "unable to connect to manager") ;
+        info!("watching changes prefixed by worker id");
+
+        loop {
+            let desired_state_definition = match work_queue.next().await {
+                None => {
+                    error!("unable to get work queue item");
+                    return;
+                }
+                Some(v) => v,
+            };
+
+            dbg!(&desired_state_definition);
+
+            match &mut self.current_state {
+                None => {
+                    for container in desired_state_definition.spec.containers.iter() {
+                        self.pull_image(&container.image)
+                            .await
+                            .expect("error pulling image");
+
+                        let containers = self.docker_client.containers();
+                        let mut create_opts =
+                            ContainerCreateOpts::builder().image(&container.image);
+
+                        for port in container.ports.iter() {
+                            let port_and_protocol =
+                                format!("{}/{}", port.container_port, port.protocol);
+                            let host_port = 8001;
+                            create_opts = create_opts.expose(
+                                PublishPort::from_str(&port_and_protocol).unwrap(),
+                                host_port,
+                            );
                         }
-                        Ok(mut client) => {
-                            if let Err(error) = client.register_worker(RegisterWorkerRequest{ worker_id:self.config.id.to_string() }).await {
-                                error!(?error, "unable to register worker");
-                            }
-                        }
-                    };
+
+                        containers.create(&create_opts.build()).await.unwrap();
+                    }
+                    self.current_state = Some(desired_state_definition);
+                }
+                Some(current_state_definition) => {
+                    todo!()
                 }
             }
-        }
-    }
 
-    #[tracing::instrument(name = "Worker::run_task", skip_all, fields(
-        definition = ?definition
-    ))]
-    pub async fn run_task(&mut self, definition: &Definition) -> Result<(), RunTaskError> {
-        todo!()
+            // TODO: if desired_state != current_state { modify_current_state() }
+        }
     }
 
     #[tracing::instrument(name = "Worker::pull_image", skip_all, fields(
         image = %image
     ))]
     pub async fn pull_image(&self, image: &str) -> Result<(), RunTaskError> {
+        info!("pulling image");
+
         let pull_opts = PullOpts::builder()
             .image("poorlydefinedbehaviour/kubia")
             .build();
@@ -179,8 +226,6 @@ impl Worker {
                 return Err(RunTaskError::PullError(err.to_string()));
             }
         }
-
-        info!("image pulled");
 
         Ok(())
     }

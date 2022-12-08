@@ -1,3 +1,4 @@
 /target
 /etcd
+/default.etcd
 etcd.tar.gz

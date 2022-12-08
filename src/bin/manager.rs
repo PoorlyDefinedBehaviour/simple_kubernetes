@@ -3,9 +3,10 @@ pub mod manager_proto {
 }
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use manager_proto::{RegisterWorkerReply, RegisterWorkerRequest};
+use manager_proto::{ApplyReply, ApplyRequest, RegisterWorkerReply, RegisterWorkerRequest};
 use simple_kubernetes::{
-    manager::{Manager, RemoteWorker, Config},
+    definition::Definition,
+    manager::{Config, Manager, RemoteWorker},
     simple_scheduler::SimpleScheduler,
 };
 use tokio::time::Instant;
@@ -84,6 +85,23 @@ impl manager_proto::manager_server::Manager for ManagerService {
             }
             Ok(reply) => Ok(Response::new(reply)),
         }
+    }
+
+    #[tracing::instrument(name = "ManagerService::apply", skip_all, fields(
+        request = ?request
+    ))]
+    async fn apply(&self, request: Request<ApplyRequest>) -> Result<Response<ApplyReply>, Status> {
+        let request = request.into_inner();
+
+        let definition: Definition = serde_yaml::from_str(&request.body)
+            .map_err(|err| Status::failed_precondition(err.to_string()))?;
+
+        self.manager
+            .apply(definition)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
+
+        Ok(Response::new(manager_proto::ApplyReply {}))
     }
 }
 

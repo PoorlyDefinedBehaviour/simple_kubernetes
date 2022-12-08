@@ -6,28 +6,28 @@ use std::{collections::HashMap, path::Path};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Definition {
     #[serde(rename = "apiVersion")]
-    api_version: String,
-    metadata: HashMap<String, String>,
-    spec: Spec,
+    pub api_version: String,
+    pub metadata: HashMap<String, String>,
+    pub spec: Spec,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Spec {
-    containers: Vec<Container>,
+    pub containers: Vec<Container>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Container {
-    image: String,
-    name: String,
-    ports: Vec<Port>,
+    pub image: String,
+    pub name: String,
+    pub ports: Vec<Port>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Port {
     #[serde(rename = "containerPort")]
-    container_port: u16,
-    protocol: String,
+    pub container_port: u16,
+    pub protocol: String,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

@@ -1,10 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use simple_kubernetes::{
-    definition::Definition,
-    manager::{Config, Manager},
-    simple_scheduler::SimpleScheduler,
-};
+use simple_kubernetes::worker::manager_proto::{self, ApplyRequest};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
@@ -21,6 +17,9 @@ enum Commands {
         /// Path to file containing the resource definition.
         #[arg(short)]
         file: String,
+        #[arg(short)]
+        /// The manager's endpoint.
+        endpoint: String,
     },
 }
 
@@ -28,16 +27,15 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let mut manager = Manager::new(
-        Config::from_file("manager.yml".to_owned()).await?,
-        Box::new(SimpleScheduler::new()),
-    )
-    .await?;
-
     match cli.command {
-        Commands::Apply { file } => {
-            let definition = Definition::from_file(&file).await?;
-            manager.apply(definition).await?;
+        Commands::Apply { file, endpoint } => {
+            let definition = tokio::fs::read_to_string(file).await?;
+
+            let mut client =
+                manager_proto::manager_client::ManagerClient::connect(endpoint).await?;
+
+            client.apply(ApplyRequest { body: definition }).await?;
+
             Ok(())
         }
     }
