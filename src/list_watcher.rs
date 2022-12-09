@@ -71,6 +71,7 @@ where
                         },
                         WatchInbound::Interrupted(error) => {
                             error!(?error, "error watching prefix");
+                            return;
                         },
                         WatchInbound::Closed => {
                             info!("prefix stream closed");

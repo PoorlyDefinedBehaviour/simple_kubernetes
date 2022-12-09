@@ -1,13 +1,12 @@
-use std::{net::SocketAddr, path::Path, str::FromStr, sync::Arc, time::Duration};
-
 use anyhow::Result;
 use docker_api::{
     opts::{ContainerCreateOpts, PublishPort, PullOpts},
     Docker,
 };
-use etcd_rs::{Client, ClientConfig, KeyRange, WatchOp};
+use etcd_rs::{Client, ClientConfig};
 use futures_util::stream::StreamExt;
 use serde::Deserialize;
+use std::{net::SocketAddr, path::Path, str::FromStr, sync::Arc, time::Duration};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -17,9 +16,6 @@ use self::manager_proto::RegisterWorkerRequest;
 
 pub type WorkerId = Uuid;
 
-pub mod worker_proto {
-    tonic::include_proto!("worker");
-}
 pub mod manager_proto {
     tonic::include_proto!("manager");
 }
@@ -112,6 +108,8 @@ impl Worker {
         config = ?config
     ))]
     pub async fn start(config: Config) -> Result<()> {
+        info!("starting worker control loop");
+
         let etcd_endpoints: Vec<_> = config
             .etcd
             .endpoints
@@ -172,8 +170,6 @@ impl Worker {
                 Some(v) => v,
             };
 
-            dbg!(&desired_state_definition);
-
             match &mut self.current_state {
                 None => {
                     for container in desired_state_definition.spec.containers.iter() {
@@ -187,7 +183,8 @@ impl Worker {
 
                         for port in container.ports.iter() {
                             let port_and_protocol =
-                                format!("{}/{}", port.container_port, port.protocol);
+                                format!("{}/{}", port.container_port, port.protocol.to_lowercase());
+
                             let host_port = 8001;
                             create_opts = create_opts.expose(
                                 PublishPort::from_str(&port_and_protocol).unwrap(),
@@ -195,13 +192,29 @@ impl Worker {
                             );
                         }
 
-                        containers.create(&create_opts.build()).await.unwrap();
+                        match containers.create(&create_opts.build()).await {
+                            Err(error) => {
+                                error!(?error, "unable to create container");
+                            }
+                            Ok(created_container) => {
+                                info!(?created_container, "container created");
+                                match created_container.start().await {
+                                    Err(error) => {
+                                        error!(?error, "unable to start container");
+                                    }
+                                    Ok(_) => {
+                                        info!("container started");
+                                    }
+                                }
+                                tokio::time::sleep(Duration::from_secs(600)).await;
+                            }
+                        }
                     }
+
+                    // TODO: the current state is not the desired statei if an error happens.
                     self.current_state = Some(desired_state_definition);
                 }
-                Some(current_state_definition) => {
-                    todo!()
-                }
+                Some(current_state_definition) => {}
             }
 
             // TODO: if desired_state != current_state { modify_current_state() }

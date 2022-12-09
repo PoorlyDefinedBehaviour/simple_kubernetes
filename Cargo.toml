@@ -9,7 +9,7 @@ uuid = { version = "1.2.2", features = ["v4", "serde"] }
 docker-api = { version = "0.12", default-features = false }
 clap = { version = "4.0.29", features = ["derive"]}
 serde = { version = "1.0.148", features = ["derive"] }
-tokio = { version = "1.22.0", features = ["fs", "rt-multi-thread", "macros"] }
+tokio = { version = "1.22.0", features = ["fs", "rt-multi-thread", "macros", "signal"] }
 anyhow = "1.0.66"
 serde_yaml = { version = "0.9.14" }
 async-trait = "0.1.59"

@@ -116,8 +116,6 @@ impl Manager {
             workers.remove(&worker_id);
         }
 
-        dbg!(&workers);
-
         let candidate_nodes = self
             .scheduler
             .select_candidate_nodes(&CandidateSelectionInput {
