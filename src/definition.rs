@@ -17,11 +17,11 @@ pub struct Definition {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Spec {
-    pub containers: Vec<Container>,
+    pub containers: Vec<ContainerSpec>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Container {
+pub struct ContainerSpec {
     pub image: String,
     pub name: ContainerName,
     pub ports: Vec<Port>,

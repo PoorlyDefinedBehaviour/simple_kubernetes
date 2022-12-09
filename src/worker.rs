@@ -1,6 +1,6 @@
 use anyhow::Result;
 use docker_api::{
-    opts::{ContainerCreateOpts, ContainerRemoveOpts, PublishPort, PullOpts},
+    opts::{ContainerCreateOpts, ContainerListOpts, ContainerRemoveOpts, PublishPort, PullOpts},
     Docker,
 };
 use etcd_rs::{Client, ClientConfig, KeyRange, KeyValueOp};
@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    definition::{Container, ContainerName, Spec},
+    definition::{ContainerName, ContainerSpec, Port, Spec},
     list_watcher::ListWatcher,
     node::Node,
     work_queue::WorkQueue,
@@ -39,16 +39,16 @@ enum ReconciliationAction {
     },
     Update {
         container_id: docker_api::Id,
-        container: Container,
+        container_spec: ContainerSpec,
     },
     Create {
-        container: Container,
+        container_spec: ContainerSpec,
     },
 }
 
 #[derive(Debug)]
 struct ContainerEntry {
-    container_definition: Container,
+    container_spec: ContainerSpec,
     container_id: docker_api::Id,
 }
 
@@ -57,8 +57,6 @@ pub struct Worker {
     config: Config,
     /// The node that the worker is running on.
     node: Node,
-    /// The current specification being used to run containers in this node.
-    spec: Option<Spec>,
     /// The containers currently running in this node.
     state: HashMap<ContainerName, ContainerEntry>,
     /// Client used to communicate with the docker daemon.
@@ -155,12 +153,12 @@ impl Worker {
 
         info!("connected to etcd");
 
+        let docker_client = Docker::new("unix:///var/run/docker.sock")?;
         let worker = Self {
             config,
             node: Node::new(),
-            spec: None,
-            state: HashMap::new(),
-            docker_client: Docker::new("unix:///var/run/docker.sock")?,
+            state: Self::build_state_from_existing_containers(&docker_client).await?,
+            docker_client,
             etcd,
         };
 
@@ -175,6 +173,29 @@ impl Worker {
         tokio::spawn(worker.watch_cluster_state_changes());
 
         Ok(())
+    }
+
+    #[tracing::instrument(name = "worker::build_state_from_existing_containers", skip_all)]
+    async fn build_state_from_existing_containers(
+        docker: &Docker,
+    ) -> Result<HashMap<ContainerName, ContainerEntry>> {
+        let mut state = HashMap::new();
+
+        let containers = docker.containers();
+        for container_summary in containers
+            .list(&ContainerListOpts::builder().all(true).build())
+            .await?
+        {
+            let container_entry = ContainerEntry::try_from(container_summary)
+                .expect("summary conversion to container entry should never fail");
+
+            // TODO: use task::Task?
+            state.insert(container_entry.container_spec.name.clone(), container_entry);
+        }
+
+        dbg!(&state);
+        todo!();
+        Ok(state)
     }
 
     #[tracing::instrument(name = "Worker::watch_cluster_state_changes", skip_all)]
@@ -213,26 +234,24 @@ impl Worker {
                             error!(?error, ?container_id, "unable to remove container");
                         }
                     }
-                    ReconciliationAction::Create { container } => {
-                        if let Err(error) = self.create_container(container).await {
+                    ReconciliationAction::Create { container_spec } => {
+                        if let Err(error) = self.create_container(container_spec).await {
                             error!(?error, "unable to create container");
                         }
                     }
                     ReconciliationAction::Update {
                         container_id,
-                        container,
+                        container_spec,
                     } => {
-                        if let Err(error) =
-                            self.update_container(container_id.clone(), container).await
+                        if let Err(error) = self
+                            .update_container(container_id.clone(), container_spec)
+                            .await
                         {
                             error!(?error, ?container_id, "unable to update container");
                         }
                     }
                 }
             }
-
-            // TODO: the current state is not the desired state if an error happens.
-            self.spec = Some(desired_state_definition);
         }
     }
 
@@ -240,19 +259,19 @@ impl Worker {
         let mut actions = Vec::new();
         let mut containers_seen = HashSet::new();
 
-        for container in desired_state.containers.iter() {
+        for container_spec in desired_state.containers.iter() {
             // TODO: cloning strings, can this be avoided?
-            containers_seen.insert(container.name.clone());
+            containers_seen.insert(container_spec.name.clone());
 
-            if self.state.contains_key(&container.name) {
-                let entry = self.state.get(&container.name).unwrap();
+            if self.state.contains_key(&container_spec.name) {
+                let entry = self.state.get(&container_spec.name).unwrap();
                 actions.push(ReconciliationAction::Update {
                     container_id: entry.container_id.clone(),
-                    container: container.clone(),
+                    container_spec: container_spec.clone(),
                 });
             } else {
                 actions.push(ReconciliationAction::Create {
-                    container: container.clone(),
+                    container_spec: container_spec.clone(),
                 });
             }
         }
@@ -291,17 +310,17 @@ impl Worker {
     }
 
     #[tracing::instrument(name = "Worker::create_container", skip_all, fields(
-        container = ?container
+        container_spec = ?container_spec
     ))]
-    async fn create_container(&mut self, container: Container) -> Result<()> {
-        self.pull_image(&container.image)
+    async fn create_container(&mut self, container_spec: ContainerSpec) -> Result<()> {
+        self.pull_image(&container_spec.image)
             .await
             .expect("error pulling image");
 
         let containers = self.docker_client.containers();
-        let mut create_opts = ContainerCreateOpts::builder().image(&container.image);
+        let mut create_opts = ContainerCreateOpts::builder().image(&container_spec.image);
 
-        for port in container.ports.iter() {
+        for port in container_spec.ports.iter() {
             let port_and_protocol =
                 format!("{}/{}", port.container_port, port.protocol.to_lowercase());
 
@@ -321,10 +340,10 @@ impl Worker {
                     }
                     Ok(_) => {
                         self.state.insert(
-                            container.name.clone(),
+                            container_spec.name.clone(),
                             ContainerEntry {
                                 container_id: created_container.id().clone(),
-                                container_definition: container,
+                                container_spec,
                             },
                         );
                         info!("container started");
@@ -341,12 +360,12 @@ impl Worker {
 
     #[tracing::instrument(name = "Worker::update_container", skip_all, fields(
         container_id = %container_id,
-        container = ?container
+        container_spec = ?container_spec
     ))]
     async fn update_container(
         &self,
         container_id: docker_api::Id,
-        container: Container,
+        container_spec: ContainerSpec,
     ) -> Result<()> {
         todo!()
     }
@@ -383,5 +402,30 @@ impl Worker {
         let range_response = self.etcd.get(KeyRange::key(key)).await?;
         let spec = serde_json::from_slice(&range_response.kvs[0].value)?;
         Ok(spec)
+    }
+}
+
+impl TryFrom<docker_api::models::ContainerSummary> for ContainerEntry {
+    type Error = anyhow::Error;
+
+    fn try_from(input: docker_api::models::ContainerSummary) -> Result<Self, Self::Error> {
+        let container_name = input.names.expect("every container must have a name")[0].clone();
+
+        Ok(ContainerEntry {
+            container_id: docker_api::Id::from(input.id.expect("container must have an id")),
+            container_spec: ContainerSpec {
+                image: input.image.expect("image should exist"),
+                name: container_name,
+                ports: input
+                    .ports
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|port| Port {
+                        container_port: port.public_port.unwrap(),
+                        protocol: port.type_,
+                    })
+                    .collect(),
+            },
+        })
     }
 }
