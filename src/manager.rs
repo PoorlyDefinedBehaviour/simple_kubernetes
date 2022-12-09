@@ -8,6 +8,8 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::info;
 
+use crate::definition::Spec;
+
 use crate::{
     definition::Definition,
     scheduler::{CandidateSelectionInput, Scheduler},
@@ -116,24 +118,32 @@ impl Manager {
             workers.remove(&worker_id);
         }
 
-        let candidate_nodes = self
+        let worker_id = self
             .scheduler
-            .select_candidate_nodes(&CandidateSelectionInput {
+            .select_node_to_run_container(&CandidateSelectionInput {
                 definition: &definition,
                 workers: &workers,
             })
             .await?;
 
-        let key = format!("node/{}/desired_state", candidate_nodes[0]);
-
-        info!(?key, "setting node desired state");
-
-        self.etcd
-            .put(PutRequest::new(key, serde_json::to_string(&definition)?))
+        self.set_worker_desired_state(worker_id, definition.spec)
             .await?;
 
-        info!("set node desired state");
+        Ok(())
+    }
 
+    /// Sets the state that the worker should match. The worker will see that the desired state changed
+    /// and make the necessary changes.
+    #[tracing::instrument(name = "manager::set_worker_desired_state", skip_all, fields(
+        worker_id = %worker_id,
+        spec = ?spec
+    ))]
+    async fn set_worker_desired_state(&self, worker_id: WorkerId, spec: Spec) -> Result<()> {
+        let key = format!("node/{}/desired_state", worker_id);
+        info!(?key, "setting the node state");
+        self.etcd
+            .put(PutRequest::new(key, serde_json::to_string(&spec)?))
+            .await?;
         Ok(())
     }
 }

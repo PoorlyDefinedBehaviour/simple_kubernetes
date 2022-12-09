@@ -20,8 +20,8 @@ pub enum CandidateSelectionError {
 
 #[async_trait]
 pub trait Scheduler: Send + Sync {
-    async fn select_candidate_nodes(
+    async fn select_node_to_run_container(
         &self,
         input: &CandidateSelectionInput,
-    ) -> Result<Vec<WorkerId>, CandidateSelectionError>;
+    ) -> Result<WorkerId, CandidateSelectionError>;
 }

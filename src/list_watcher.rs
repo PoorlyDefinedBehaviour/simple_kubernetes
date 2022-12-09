@@ -1,4 +1,4 @@
-use crate::{definition::Definition, work_queue::WorkQueue};
+use crate::{definition::Spec, work_queue::WorkQueue};
 use etcd_rs::{Client, KeyRange, KeyValueOp, WatchInbound, WatchOp};
 use std::{sync::Arc, time::Duration};
 use tokio::select;
@@ -27,6 +27,8 @@ where
         prefix = %prefix
     ))]
     pub async fn list_and_watch(self, prefix: String) {
+        info!("listing and watching prefix");
+
         let (mut stream, _cancel) = self
             .etcd
             .watch(KeyRange::prefix(prefix.clone()))
@@ -84,7 +86,7 @@ where
     }
 }
 
-impl TryFrom<etcd_rs::KeyValue> for Definition {
+impl TryFrom<etcd_rs::KeyValue> for Spec {
     type Error = serde_json::Error;
 
     fn try_from(value: etcd_rs::KeyValue) -> Result<Self, Self::Error> {

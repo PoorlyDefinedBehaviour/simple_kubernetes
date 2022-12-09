@@ -1,6 +1,10 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::Path};
+use uuid::Uuid;
+
+pub type ContainerId = Uuid;
+pub type ContainerName = String;
 
 /// The resource definition used in apply -f <FILE>
 #[derive(Debug, Serialize, Deserialize)]
@@ -16,14 +20,14 @@ pub struct Spec {
     pub containers: Vec<Container>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Container {
     pub image: String,
-    pub name: String,
+    pub name: ContainerName,
     pub ports: Vec<Port>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Port {
     #[serde(rename = "containerPort")]
     pub container_port: u16,

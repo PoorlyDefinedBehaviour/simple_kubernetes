@@ -14,14 +14,14 @@ impl SimpleScheduler {
 
 #[async_trait]
 impl Scheduler for SimpleScheduler {
-    #[tracing::instrument(name= "SimpleScheduler::select_candidate_nodes", skip_all, fields(
+    #[tracing::instrument(name= "SimpleScheduler::select_node_to_run_container", skip_all, fields(
     input = ?input
   ))]
-    async fn select_candidate_nodes(
+    async fn select_node_to_run_container(
         &self,
         input: &CandidateSelectionInput,
-    ) -> Result<Vec<WorkerId>, CandidateSelectionError> {
+    ) -> Result<WorkerId, CandidateSelectionError> {
         let worker_id = input.workers.keys().next().cloned().unwrap();
-        Ok(vec![worker_id])
+        Ok(worker_id)
     }
 }
