@@ -1,12 +1,14 @@
-use crate::{definition::Spec, work_queue::WorkQueue};
+use crate::task_proto::Tasks;
 use etcd_rs::{Client, KeyRange, KeyValueOp, WatchInbound, WatchOp};
-use std::{sync::Arc, time::Duration};
+use prost::{DecodeError, Message};
+use std::time::Duration;
 use tokio::select;
+use tokio::sync::mpsc::Sender;
 use tracing::{error, info};
 
 pub struct ListWatcher<T> {
     resync_interval: Duration,
-    work_queue: Arc<WorkQueue<T>>,
+    work_tx: Sender<T>,
     etcd: Client,
 }
 
@@ -15,10 +17,10 @@ where
     T: TryFrom<etcd_rs::KeyValue> + std::fmt::Debug,
     <T as TryFrom<etcd_rs::KeyValue>>::Error: std::fmt::Debug,
 {
-    pub fn new(resync_interval: Duration, work_queue: Arc<WorkQueue<T>>, etcd: Client) -> Self {
+    pub fn new(resync_interval: Duration, work_tx: Sender<T>, etcd: Client) -> Self {
         Self {
             resync_interval,
-            work_queue,
+            work_tx,
             etcd,
         }
     }
@@ -56,20 +58,38 @@ where
                     info!("fetched {} entries", range_response.kvs.len());
 
                     for kv in range_response.kvs {
-                        let t = T::try_from(kv).expect("unexpected data format, this is a bug.");
-                        self.work_queue.append(t).await.expect("work queue append failed");
+                        let t = match T::try_from(kv) {
+                            Err(error) => {
+                                error!(?error, "unexpected data format, this is a bug.");
+                                continue;
+                            },
+                            Ok(v) => v
+                        };
+
+                        if let Err(error) = self.work_tx.send(t).await {
+                            error!(?error, "unable to send item to work channel")
+                        };
                     }
                 },
                 // TODO: i think this may be broken, are events being received?
                 message = stream.inbound() => {
-                    info!(?message, "update received for prefix");
                     match message {
                         WatchInbound::Ready(watch_response) => {
                             for event in watch_response.events {
-                                let t = T::try_from(event.kv).expect("unexpected data format, this is a bug.");
-                                self.work_queue.append(t).await.expect("work queue append failed");
-                            }
+                                let t = match T::try_from(event.kv) {
+                                    Err(error) => {
+                                        error!(?error, "unexpected data format, this is a bug.");
+                                        continue;
+                                    },
+                                    Ok(v) => v
+                                };
 
+                                info!(value = ?t, "update received for prefix");
+
+                                if let Err(error) = self.work_tx.send(t).await {
+                                    error!(?error, "unable to send item to work channel")
+                                };
+                            }
                         },
                         WatchInbound::Interrupted(error) => {
                             error!(?error, "error watching prefix");
@@ -86,10 +106,10 @@ where
     }
 }
 
-impl TryFrom<etcd_rs::KeyValue> for Spec {
-    type Error = serde_json::Error;
+impl TryFrom<etcd_rs::KeyValue> for Tasks {
+    type Error = DecodeError;
 
     fn try_from(value: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
-        serde_json::from_slice(&value.value)
+        Tasks::decode(value.value.as_ref())
     }
 }

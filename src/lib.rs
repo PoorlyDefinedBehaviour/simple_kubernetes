@@ -2,11 +2,11 @@ pub mod definition;
 pub mod manager;
 
 pub mod list_watcher;
+pub mod manager_proto;
 pub mod node;
 pub mod scheduler;
 pub mod simple_scheduler;
-pub mod task;
-pub mod work_queue;
+pub mod task_proto;
 pub mod worker;
 
 #[cfg(test)]

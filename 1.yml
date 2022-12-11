@@ -5,7 +5,7 @@ metadata:
 spec:
   containers:
     - image: poorlydefinedbehaviour/kubia
-      name: kubia
+      name: kubia-1
       ports:
-        - containerPort: 8080
+        - containerPort: 8894
           protocol: TCP

@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package task;
+
+enum State {
+  pending = 0;
+  running = 1;
+  completed = 2;
+  failed = 3;
+  created = 4;
+}
+
+message Task {
+  string id = 1;
+  string name = 2;
+  State state = 3;
+  string image = 4;
+  repeated PortBinding port_bindings = 5;
+  string container_id = 6;
+}
+
+message PortBinding {
+  uint32 port = 1;
+  string protocol = 2;
+}
+
+message Tasks {
+  repeated Task tasks = 1;
+}

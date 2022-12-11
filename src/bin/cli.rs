@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use simple_kubernetes::worker::manager_proto::{self, ApplyRequest};
+use simple_kubernetes::manager_proto::{self, ApplyRequest};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]

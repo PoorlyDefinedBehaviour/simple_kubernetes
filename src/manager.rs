@@ -1,5 +1,6 @@
 use anyhow::Result;
 use etcd_rs::{Client, ClientConfig, KeyValueOp, PutRequest};
+use prost::Message;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -7,13 +8,13 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::info;
+use uuid::Uuid;
 
-use crate::definition::Spec;
-
+use crate::manager_proto::RegisterWorkerRequest;
+use crate::task_proto::{Task, TaskName, Tasks};
 use crate::{
     definition::Definition,
     scheduler::{CandidateSelectionInput, Scheduler},
-    task::{Task, TaskName},
     worker::WorkerId,
 };
 
@@ -42,8 +43,18 @@ impl Config {
 
 struct TaskEntry {
     definition: Definition,
-    task: Task,
     workers: HashSet<WorkerId>,
+}
+
+impl TryFrom<RegisterWorkerRequest> for RemoteWorker {
+    type Error = anyhow::Error;
+
+    fn try_from(input: RegisterWorkerRequest) -> Result<RemoteWorker> {
+        Ok(RemoteWorker {
+            worker_id: Uuid::parse_str(&input.worker_id)?,
+            heartbeat_received_at: Instant::now(),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -126,8 +137,9 @@ impl Manager {
             })
             .await?;
 
-        self.set_worker_desired_state(worker_id, definition.spec)
-            .await?;
+        let tasks = Tasks::from(definition);
+
+        self.set_worker_desired_state(worker_id, tasks).await?;
 
         Ok(())
     }
@@ -136,14 +148,16 @@ impl Manager {
     /// and make the necessary changes.
     #[tracing::instrument(name = "manager::set_worker_desired_state", skip_all, fields(
         worker_id = %worker_id,
-        spec = ?spec
+        tasks = ?tasks
     ))]
-    async fn set_worker_desired_state(&self, worker_id: WorkerId, spec: Spec) -> Result<()> {
+    async fn set_worker_desired_state(&self, worker_id: WorkerId, tasks: Tasks) -> Result<()> {
         let key = format!("node/{}/desired_state", worker_id);
         info!(?key, "setting the node state");
-        self.etcd
-            .put(PutRequest::new(key, serde_json::to_string(&spec)?))
-            .await?;
+
+        let buffer = tasks.encode_to_vec();
+
+        self.etcd.put(PutRequest::new(key, buffer)).await?;
+
         Ok(())
     }
 }

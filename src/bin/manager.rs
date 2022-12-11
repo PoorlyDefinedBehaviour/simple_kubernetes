@@ -1,19 +1,16 @@
-pub mod manager_proto {
-    tonic::include_proto!("manager");
-}
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use manager_proto::{ApplyReply, ApplyRequest, RegisterWorkerReply, RegisterWorkerRequest};
+use simple_kubernetes::manager_proto::{
+    self, ApplyReply, ApplyRequest, RegisterWorkerReply, RegisterWorkerRequest,
+};
 use simple_kubernetes::{
     definition::Definition,
-    manager::{Config, Manager, RemoteWorker},
+    manager::{Config, Manager},
     simple_scheduler::SimpleScheduler,
 };
-use tokio::time::Instant;
+use tracing::{error, info, Level};
 
 use tonic::{transport::Server, Request, Response, Status};
-use tracing::{error, info, Level};
-use uuid::Uuid;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
@@ -40,17 +37,6 @@ pub struct ManagerService {
 impl ManagerService {
     fn new(manager: Manager) -> Self {
         Self { manager }
-    }
-}
-
-impl TryFrom<RegisterWorkerRequest> for RemoteWorker {
-    type Error = anyhow::Error;
-
-    fn try_from(input: RegisterWorkerRequest) -> Result<RemoteWorker> {
-        Ok(RemoteWorker {
-            worker_id: Uuid::parse_str(&input.worker_id)?,
-            heartbeat_received_at: Instant::now(),
-        })
     }
 }
 

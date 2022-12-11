@@ -1,55 +1,38 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use docker_api::{
     opts::{ContainerCreateOpts, ContainerListOpts, ContainerRemoveOpts, PublishPort, PullOpts},
     Docker,
 };
 use etcd_rs::{Client, ClientConfig, KeyRange, KeyValueOp};
 use futures_util::stream::StreamExt;
+use prost::Message;
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     path::Path,
     str::FromStr,
-    sync::Arc,
     time::Duration,
 };
+use tokio::select;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    definition::{ContainerName, ContainerSpec, Port, Spec},
+    definition::ContainerName,
     list_watcher::ListWatcher,
+    manager_proto::{self, RegisterWorkerRequest},
     node::Node,
-    work_queue::WorkQueue,
+    task_proto::{PortBinding, State, Task, Tasks},
 };
-
-use self::manager_proto::RegisterWorkerRequest;
 
 pub type WorkerId = Uuid;
 
-pub mod manager_proto {
-    tonic::include_proto!("manager");
-}
-
 #[derive(Debug)]
 enum ReconciliationAction {
-    Remove {
-        container_id: docker_api::Id,
-    },
-    Update {
-        container_id: docker_api::Id,
-        container_spec: ContainerSpec,
-    },
-    Create {
-        container_spec: ContainerSpec,
-    },
-}
-
-#[derive(Debug)]
-struct ContainerEntry {
-    container_spec: ContainerSpec,
-    container_id: docker_api::Id,
+    Remove { container_id: String },
+    Recreate { container_id: String, task: Task },
+    Create { task: Task },
 }
 
 /// Runs as a daemon on every node. Responsible for creating/stopping/etc containers.
@@ -58,7 +41,7 @@ pub struct Worker {
     /// The node that the worker is running on.
     node: Node,
     /// The containers currently running in this node.
-    state: HashMap<ContainerName, ContainerEntry>,
+    state: HashMap<ContainerName, Task>,
     /// Client used to communicate with the docker daemon.
     docker_client: Docker,
     /// Client used to communicate with etcd.
@@ -112,12 +95,15 @@ pub enum RunTaskError {
     manager_endpoint = %manager_endpoint
 ))]
 async fn heartbeat(worker_id: WorkerId, manager_endpoint: String, heartbeat_interval: Duration) {
+    let mut ticker = tokio::time::interval(heartbeat_interval);
+
     loop {
+        ticker.tick().await;
         // TODO: do not recreate client
         match manager_proto::manager_client::ManagerClient::connect(manager_endpoint.clone()).await
         {
             Err(error) => {
-                warn!(?error, "unable to connect to manager");
+                warn!(?error, "unable to connect to manager, will retry later");
             }
             Ok(mut client) => {
                 if let Err(error) = client
@@ -130,8 +116,6 @@ async fn heartbeat(worker_id: WorkerId, manager_endpoint: String, heartbeat_inte
                 }
             }
         };
-
-        tokio::time::sleep(heartbeat_interval).await;
     }
 }
 
@@ -157,7 +141,7 @@ impl Worker {
         let worker = Self {
             config,
             node: Node::new(),
-            state: Self::build_state_from_existing_containers(&docker_client).await?,
+            state: HashMap::new(),
             docker_client,
             etcd,
         };
@@ -176,39 +160,40 @@ impl Worker {
     }
 
     #[tracing::instrument(name = "worker::build_state_from_existing_containers", skip_all)]
-    async fn build_state_from_existing_containers(
-        docker: &Docker,
-    ) -> Result<HashMap<ContainerName, ContainerEntry>> {
-        let mut state = HashMap::new();
+    async fn build_state_from_existing_containers(&mut self) -> Result<()> {
+        info!("building state from existing containers");
 
-        let containers = docker.containers();
+        // State is unknown.
+        self.state.clear();
+
+        let containers = self.docker_client.containers();
         for container_summary in containers
             .list(&ContainerListOpts::builder().all(true).build())
             .await?
         {
-            let container_entry = ContainerEntry::try_from(container_summary)
-                .expect("summary conversion to container entry should never fail");
+            let task = Task::try_from(container_summary)
+                .expect("summary conversion to task should never fail");
 
-            // TODO: use task::Task?
-            state.insert(container_entry.container_spec.name.clone(), container_entry);
+            self.state.insert(task.name.clone(), task);
         }
 
-        dbg!(&state);
-        todo!();
-        Ok(state)
+        Ok(())
     }
 
     #[tracing::instrument(name = "Worker::watch_cluster_state_changes", skip_all)]
     async fn watch_cluster_state_changes(mut self) {
         // The desired state for this node. Changes to the desired state are
         // appended to the work queue before being processed.
-        let work_queue: Arc<WorkQueue<Spec>> = Arc::new(WorkQueue::new());
+        let (work_tx, mut work_rx) = tokio::sync::mpsc::channel::<Tasks>(100);
         let list_watcher = ListWatcher::new(
             // TODO: make configurable
-            Duration::from_secs(30),
-            Arc::clone(&work_queue),
+            Duration::from_secs(15),
+            work_tx,
             self.etcd.clone(),
         );
+
+        let mut build_state_from_existing_containers_interval =
+            tokio::time::interval(Duration::from_secs(10));
 
         let desired_state_key = format!("node/{}/desired_state", self.config.id);
 
@@ -216,38 +201,41 @@ impl Worker {
         tokio::spawn(list_watcher.list_and_watch(desired_state_key));
 
         loop {
-            let desired_state_definition = match work_queue.next().await {
-                None => {
-                    error!("unable to get work queue item");
-                    return;
-                }
-                Some(v) => v,
-            };
-
-            let state_reconciliation_actions =
-                self.state_reconciliation_actions(&desired_state_definition);
-
-            for action in state_reconciliation_actions {
-                match action {
-                    ReconciliationAction::Remove { container_id } => {
-                        if let Err(error) = self.remove_container(container_id.clone()).await {
-                            error!(?error, ?container_id, "unable to remove container");
-                        }
+            select! {
+                _ = build_state_from_existing_containers_interval.tick() => {
+                    if let Err(error) = self.build_state_from_existing_containers().await {
+                        error!(?error, "unable to build state from existing containers");
                     }
-                    ReconciliationAction::Create { container_spec } => {
-                        if let Err(error) = self.create_container(container_spec).await {
-                            error!(?error, "unable to create container");
+                },
+                work_queue_item = work_rx.recv() => {
+                    let desired_state_definition = match work_queue_item {
+                        None => {
+                            error!("unable to get work queue item because channel is closed");
+                            return;
                         }
-                    }
-                    ReconciliationAction::Update {
-                        container_id,
-                        container_spec,
-                    } => {
-                        if let Err(error) = self
-                            .update_container(container_id.clone(), container_spec)
-                            .await
-                        {
-                            error!(?error, ?container_id, "unable to update container");
+                        Some(v) => v,
+                    };
+
+                    let state_reconciliation_actions =
+                        self.state_reconciliation_actions(&desired_state_definition);
+
+                    for action in state_reconciliation_actions {
+                        match action {
+                            ReconciliationAction::Remove { container_id } => {
+                                if let Err(error) = self.remove_container(&container_id).await {
+                                    error!(?error, ?container_id, "unable to remove container");
+                                }
+                            }
+                            ReconciliationAction::Create { task } => {
+                                if let Err(error) = self.create_container(task).await {
+                                    error!(?error, "unable to create container");
+                                }
+                            }
+                            ReconciliationAction::Recreate { container_id, task } => {
+                                if let Err(error) = self.recreate_container(&container_id, task).await {
+                                    error!(?error, ?container_id, "unable to recreate container");
+                                }
+                            }
                         }
                     }
                 }
@@ -255,24 +243,26 @@ impl Worker {
         }
     }
 
-    fn state_reconciliation_actions(&self, desired_state: &Spec) -> Vec<ReconciliationAction> {
+    fn state_reconciliation_actions(&self, desired_state: &Tasks) -> Vec<ReconciliationAction> {
         let mut actions = Vec::new();
         let mut containers_seen = HashSet::new();
 
-        for container_spec in desired_state.containers.iter() {
+        for task in desired_state.tasks.iter() {
             // TODO: cloning strings, can this be avoided?
-            containers_seen.insert(container_spec.name.clone());
+            containers_seen.insert(task.name.clone());
 
-            if self.state.contains_key(&container_spec.name) {
-                let entry = self.state.get(&container_spec.name).unwrap();
-                actions.push(ReconciliationAction::Update {
-                    container_id: entry.container_id.clone(),
-                    container_spec: container_spec.clone(),
-                });
-            } else {
-                actions.push(ReconciliationAction::Create {
-                    container_spec: container_spec.clone(),
-                });
+            match self.state.get(&task.name) {
+                None => {
+                    actions.push(ReconciliationAction::Create { task: task.clone() });
+                }
+                Some(entry) => {
+                    if task_desired_state_has_changed(&task, entry) {
+                        actions.push(ReconciliationAction::Recreate {
+                            container_id: entry.container_id.clone(),
+                            task: task.clone(),
+                        });
+                    }
+                }
             }
         }
 
@@ -292,82 +282,84 @@ impl Worker {
     #[tracing::instrument(name = "Worker::remove_container", skip_all, fields(
         container_id = %container_id
     ))]
-    async fn remove_container(&mut self, container_id: docker_api::Id) -> Result<()> {
-        info!(?container_id, "removing container");
-        let container = {
-            docker_api::container::Container::new(self.docker_client.clone(), container_id.clone())
-        };
-        if let Err(error) = container
-            .remove(&ContainerRemoveOpts::builder().force(true).build())
-            .await
-        {
-            error!(?error, ?container_id, "unable to remove container");
-        }
+    async fn remove_container(&mut self, container_id: &str) -> Result<()> {
+        let container =
+            docker_api::container::Container::new(self.docker_client.clone(), container_id);
 
-        self.state.remove(&container.inspect().await?.name.unwrap());
+        let container_name = container.inspect().await?.name.unwrap();
+        let container_name = format_container_name(&container_name);
+
+        info!(?container_id, %container_name, "removing container");
+
+        container
+            .remove(
+                &ContainerRemoveOpts::builder()
+                    .force(true)
+                    .volumes(true)
+                    .build(),
+            )
+            .await?;
+
+        self.state.remove(container_name);
 
         Ok(())
     }
 
     #[tracing::instrument(name = "Worker::create_container", skip_all, fields(
-        container_spec = ?container_spec
+        task = ?task
     ))]
-    async fn create_container(&mut self, container_spec: ContainerSpec) -> Result<()> {
-        self.pull_image(&container_spec.image)
+    async fn create_container(&mut self, mut task: Task) -> Result<()> {
+        self.pull_image(&task.image)
             .await
-            .expect("error pulling image");
+            .context("pulling image")?;
 
         let containers = self.docker_client.containers();
-        let mut create_opts = ContainerCreateOpts::builder().image(&container_spec.image);
+        let mut create_opts = ContainerCreateOpts::builder()
+            .image(&task.image)
+            .name(&task.name);
 
-        for port in container_spec.ports.iter() {
-            let port_and_protocol =
-                format!("{}/{}", port.container_port, port.protocol.to_lowercase());
+        for port_binding in task.port_bindings.iter() {
+            let port_and_protocol = format!(
+                "{}/{}",
+                port_binding.port,
+                port_binding.protocol.to_lowercase()
+            );
 
-            let host_port = 8001;
+            let host_port = port_binding.port;
             create_opts = create_opts.expose(PublishPort::from_str(&port_and_protocol)?, host_port);
         }
 
-        match containers.create(&create_opts.build()).await {
-            Err(error) => {
-                error!(?error, "unable to create container");
-            }
-            Ok(created_container) => {
-                info!(?created_container, "container created");
-                match created_container.start().await {
-                    Err(error) => {
-                        error!(?error, "unable to start container");
-                    }
-                    Ok(_) => {
-                        self.state.insert(
-                            container_spec.name.clone(),
-                            ContainerEntry {
-                                container_id: created_container.id().clone(),
-                                container_spec,
-                            },
-                        );
-                        info!("container started");
-                    }
-                }
+        if let Err(_) = self.remove_container(&task.name).await { /* no-op */ }
 
-                // TODO: remove after debug.
-                tokio::time::sleep(Duration::from_secs(600)).await;
-            }
-        }
+        let created_container = containers
+            .create(&create_opts.build())
+            .await
+            .context("creating container")?;
+
+        info!(?created_container, "container created");
+
+        created_container
+            .start()
+            .await
+            .context("starting container")?;
+
+        task.container_id = created_container.id().to_string();
+        task.state = State::Running.as_i32();
+        self.state.insert(task.name.clone(), task);
+        info!("container started");
 
         Ok(())
     }
 
-    #[tracing::instrument(name = "Worker::update_container", skip_all, fields(
+    #[tracing::instrument(name = "Worker::recreate_container", skip_all, fields(
         container_id = %container_id,
-        container_spec = ?container_spec
+        task = ?task
     ))]
-    async fn update_container(
-        &self,
-        container_id: docker_api::Id,
-        container_spec: ContainerSpec,
-    ) -> Result<()> {
-        todo!()
+    async fn recreate_container(&mut self, container_id: &str, task: Task) -> Result<()> {
+        info!(?container_id, name = %task.name, "recreating container");
+        self.remove_container(container_id).await?;
+        self.create_container(task).await?;
+        Ok(())
     }
 
     #[tracing::instrument(name = "Worker::pull_image", skip_all, fields(
@@ -396,36 +388,60 @@ impl Worker {
     #[tracing::instrument(name = "manager::get_worker_current_state", skip_all, fields(
             worker_id = %worker_id
         ))]
-    async fn get_worker_current_state(&self, worker_id: WorkerId) -> Result<Spec> {
+    async fn get_worker_current_state(&self, worker_id: WorkerId) -> Result<Tasks> {
         let key = format!("node/{}/current_state", worker_id);
         info!(?key, "getting the current node state");
         let range_response = self.etcd.get(KeyRange::key(key)).await?;
-        let spec = serde_json::from_slice(&range_response.kvs[0].value)?;
-        Ok(spec)
+        let tasks = Tasks::decode(range_response.kvs[0].value.as_ref())?;
+        Ok(tasks)
     }
 }
 
-impl TryFrom<docker_api::models::ContainerSummary> for ContainerEntry {
+impl TryFrom<docker_api::models::ContainerSummary> for Task {
     type Error = anyhow::Error;
 
     fn try_from(input: docker_api::models::ContainerSummary) -> Result<Self, Self::Error> {
         let container_name = input.names.expect("every container must have a name")[0].clone();
 
-        Ok(ContainerEntry {
-            container_id: docker_api::Id::from(input.id.expect("container must have an id")),
-            container_spec: ContainerSpec {
-                image: input.image.expect("image should exist"),
-                name: container_name,
-                ports: input
-                    .ports
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|port| Port {
-                        container_port: port.public_port.unwrap(),
-                        protocol: port.type_,
-                    })
-                    .collect(),
-            },
+        Ok(Task {
+            id: Uuid::new_v4().to_string(),
+            container_id: input.id.unwrap_or_default(),
+            state: State::try_from(input.state.unwrap_or_default().as_ref())?.into(),
+            image: input.image.expect("image should exist"),
+            name: format_container_name(&container_name).to_owned(),
+            port_bindings: input
+                .ports
+                .unwrap_or_default()
+                .into_iter()
+                .map(|port| PortBinding {
+                    port: port.public_port.unwrap() as u32,
+                    protocol: port.type_,
+                })
+                .collect(),
         })
     }
+}
+
+#[tracing::instrument(name = "worker::format_container_name", skip_all, fields(
+    name = %name
+))]
+pub fn format_container_name(name: &str) -> &str {
+    name.strip_prefix("/").unwrap_or_default()
+}
+
+#[tracing::instrument(name = "worker::task_desired_state_has_changed", skip_all, fields(
+    desired_state = ?desired_state,
+    current_state = ?current_state,
+    changed
+))]
+fn task_desired_state_has_changed(desired_state: &Task, current_state: &Task) -> bool {
+    let changed = (!current_state.is_running() && !current_state.is_completed())
+        || desired_state.name != current_state.name
+        || desired_state.image != current_state.image;
+
+    tracing::Span::current().record("changed", changed);
+
+    info!("task desired state changed");
+
+    changed
 }
