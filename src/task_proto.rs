@@ -2,6 +2,7 @@ pub mod task_proto {
     tonic::include_proto!("task");
 }
 
+use prost::{DecodeError, Message};
 pub use task_proto::*;
 
 use crate::definition;
@@ -147,4 +148,12 @@ fn split_in_n_and_unit(repr: &str) -> Result<(u64, &str)> {
     let (n, s) = repr.split_at(i);
     let n = n.parse::<u64>()?;
     Ok((n, s))
+}
+
+impl TryFrom<etcd_rs::KeyValue> for task_proto::TaskSet {
+    type Error = DecodeError;
+
+    fn try_from(kv: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
+        task_proto::TaskSet::decode(kv.value.as_ref())
+    }
 }

@@ -4,7 +4,7 @@ use docker_api::{
     opts::{ContainerCreateOpts, ContainerListOpts, ContainerRemoveOpts, PublishPort, PullOpts},
     Docker,
 };
-use etcd_rs::{Client, ClientConfig, KeyValueOp, PutRequest};
+use etcd_rs::{Client, ClientConfig, KeyRange, KeyValueOp, PutRequest};
 use futures_util::stream::StreamExt;
 use prost::Message;
 use serde::Deserialize;
@@ -135,13 +135,15 @@ impl Worker {
         info!("connected to etcd");
 
         let docker_client = Docker::new("unix:///var/run/docker.sock")?;
-        let worker = Self {
+        let mut worker = Self {
             config,
             node: Node::new(),
             state: HashMap::new(),
             docker_client,
             etcd,
         };
+
+        worker.build_state_from_existing_containers().await?;
 
         info!("spawning worker control loop");
         tokio::spawn(worker.watch_cluster_state_changes());
@@ -153,6 +155,20 @@ impl Worker {
     async fn build_state_from_existing_containers(&mut self) -> Result<()> {
         info!("building state from existing containers");
 
+        let containers_that_belong_to_worker = {
+            let current_state = self.get_current_state().await?;
+
+            if let Some(current_state) = current_state {
+                current_state
+                    .tasks
+                    .into_iter()
+                    .map(|task| task.name)
+                    .collect()
+            } else {
+                HashSet::new()
+            }
+        };
+
         // State is unknown.
         self.state.clear();
 
@@ -163,6 +179,10 @@ impl Worker {
         {
             let task = LocalTask::try_from(container_summary)
                 .expect("summary conversion to task should never fail");
+
+            if !containers_that_belong_to_worker.contains(&task.name) {
+                continue;
+            }
 
             self.state.insert(task.name.clone(), task);
         }
@@ -200,9 +220,9 @@ impl Worker {
                     }
                 },
                 _ = build_state_from_existing_containers_interval.tick() => {
-                    if let Err(error) = self.build_state_from_existing_containers().await {
-                        error!(?error, "unable to build state from existing containers");
-                    }
+                    // if let Err(error) = self.build_state_from_existing_containers().await {
+                    //     error!(?error, "unable to build state from existing containers");
+                    // }
                 },
                 work_queue_item = work_rx.recv() => {
                     let desired_state_definition = match work_queue_item {
@@ -234,6 +254,12 @@ impl Worker {
                                 }
                             }
                         }
+                    }
+
+                    // No need to store the same state at the next tick.
+                    store_current_state_interval.reset();
+                    if let Err(error) = self.store_current_state().await {
+                        error!(?error, "unable to store current state");
                     }
                 }
             }
@@ -411,6 +437,41 @@ impl Worker {
 
         Ok(())
     }
+
+    /// Returns the last known state of this node.
+    #[tracing::instrument(name = "Worker::get_current_state", skip_all)]
+    async fn get_current_state(&mut self) -> Result<Option<worker_proto::CurrentState>> {
+        let key = format!("workers/current_state/{}", self.config.id);
+
+        info!(?key, "fetching worker state");
+
+        let current_state = worker_proto::CurrentState {
+            worker_id: self.config.id.to_string(),
+            hostname: self.node.hostname().unwrap_or_default(),
+            max_memory: self.node.max_memory(),
+            memory_allocated: self.node.memory_allocated(),
+            max_disk_size: self.node.max_disk_size(),
+            disk_allocated: self.node.disk_allocated(),
+            timestamp: Utc::now().timestamp_millis(),
+            tasks: self
+                .state
+                .iter()
+                .map(|(_, task)| worker_proto::Task::from(task.clone()))
+                .collect(),
+        };
+
+        dbg!(&current_state);
+
+        let range_response = self.etcd.get(KeyRange::key(key)).await?;
+
+        match range_response.kvs.first() {
+            None => Ok(None),
+            Some(kv) => {
+                let current_state = worker_proto::CurrentState::try_from(kv)?;
+                Ok(Some(current_state))
+            }
+        }
+    }
 }
 
 impl TryFrom<docker_api::models::ContainerSummary> for LocalTask {
@@ -447,7 +508,9 @@ fn task_desired_state_has_changed(desired_state: &Task, current_state: &LocalTas
 
     tracing::Span::current().record("changed", changed);
 
-    info!("task desired state changed");
+    if changed {
+        info!("task desired state changed");
+    }
 
     changed
 }

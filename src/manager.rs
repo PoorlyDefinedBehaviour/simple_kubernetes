@@ -4,17 +4,31 @@ use prost::Message;
 use serde::Deserialize;
 
 use std::path::Path;
+use std::time::Duration;
 
 use tracing::info;
 
 use crate::definition::Definition;
+use crate::simple_scheduler;
 use crate::task_proto::TaskSet;
 
 #[derive(Debug, Deserialize)]
-pub struct Config {}
+pub struct Config {
+    pub worker: WorkerConfig,
+}
 
 #[derive(Debug, Deserialize)]
-pub struct WorkerConfig {}
+pub struct WorkerConfig {
+    pub heartbeat_timeout_secs: u64,
+}
+
+impl From<&Config> for simple_scheduler::Config {
+    fn from(input: &Config) -> Self {
+        Self {
+            heartbeat_timeout_secs: Duration::from_secs(input.worker.heartbeat_timeout_secs),
+        }
+    }
+}
 
 impl Config {
     #[tracing::instrument(name = "manager::Config::from_file", skip_all, fields(

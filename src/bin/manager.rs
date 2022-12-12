@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use simple_kubernetes::manager_proto::{self, ApplyReply, ApplyRequest};
+use simple_kubernetes::simple_scheduler;
 use simple_kubernetes::{
     definition::Definition,
     manager::{Config, Manager},
@@ -78,9 +79,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             info!("connected to etcd");
 
-            let manager = Manager::new(Config::from_file(file).await?, etcd.clone());
+            let manager_config = Config::from_file(file).await?;
+            let scheduler_config = simple_scheduler::Config::from(&manager_config);
 
-            let scheduler = SimpleScheduler::new(etcd);
+            let manager = Manager::new(manager_config, etcd.clone());
+
+            let scheduler = SimpleScheduler::new(scheduler_config, etcd);
             tokio::spawn(scheduler.watch_cluster_state_changes());
 
             let svc =

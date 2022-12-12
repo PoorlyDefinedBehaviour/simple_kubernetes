@@ -1,2 +1,2 @@
 worker:
-  heartbeat_timeout: 15
+  heartbeat_timeout_secs: 15

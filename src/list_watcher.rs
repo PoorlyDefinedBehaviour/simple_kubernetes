@@ -1,7 +1,6 @@
-use crate::{task_proto, worker_proto};
 use anyhow::Context;
 use etcd_rs::{Client, KeyRange, KeyValueOp, WatchInbound, WatchOp};
-use prost::{DecodeError, Message};
+
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc::Sender;
@@ -111,21 +110,5 @@ where
                 }
             }
         }
-    }
-}
-
-impl TryFrom<etcd_rs::KeyValue> for task_proto::TaskSet {
-    type Error = DecodeError;
-
-    fn try_from(kv: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
-        task_proto::TaskSet::decode(kv.value.as_ref())
-    }
-}
-
-impl TryFrom<etcd_rs::KeyValue> for worker_proto::CurrentState {
-    type Error = DecodeError;
-
-    fn try_from(kv: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
-        worker_proto::CurrentState::decode(kv.value.as_ref())
     }
 }

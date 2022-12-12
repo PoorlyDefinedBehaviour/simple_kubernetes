@@ -4,6 +4,7 @@ pub mod worker_proto {
 
 pub type WorkerId = String;
 
+use prost::{DecodeError, Message};
 pub use worker_proto::*;
 
 use crate::worker::LocalTask;
@@ -21,5 +22,21 @@ impl From<LocalTask> for Task {
             state: input.state,
             image: input.image,
         }
+    }
+}
+
+impl TryFrom<etcd_rs::KeyValue> for worker_proto::CurrentState {
+    type Error = DecodeError;
+
+    fn try_from(kv: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
+        worker_proto::CurrentState::try_from(&kv)
+    }
+}
+
+impl TryFrom<&etcd_rs::KeyValue> for worker_proto::CurrentState {
+    type Error = DecodeError;
+
+    fn try_from(kv: &etcd_rs::KeyValue) -> Result<Self, Self::Error> {
+        worker_proto::CurrentState::decode(kv.value.as_ref())
     }
 }

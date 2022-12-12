@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use chrono::Utc;
 use etcd_rs::{Client, KeyValueOp, PutRequest};
 use prost::Message;
 use std::collections::HashMap;
@@ -13,12 +14,18 @@ use crate::task_proto::{self, TaskSet, TaskSetName};
 
 use crate::worker_proto::{self, WorkerId};
 
+#[derive(Debug)]
+pub struct Config {
+    pub heartbeat_timeout_secs: Duration,
+}
+
 struct WorkerTasks {
     worker_id: Option<WorkerId>,
     taskset: task_proto::TaskSet,
 }
 
 pub struct SimpleScheduler {
+    config: Config,
     /// Information about workers that are part of the cluster.
     workers: HashMap<WorkerId, worker_proto::CurrentState>,
     /// Tasks that are running in the cluster.
@@ -28,9 +35,12 @@ pub struct SimpleScheduler {
 }
 
 impl SimpleScheduler {
-    #[tracing::instrument(name = "SimpleScheduler::new", skip_all)]
-    pub fn new(etcd: Client) -> Self {
+    #[tracing::instrument(name = "SimpleScheduler::new", skip_all, fields(
+        config = ?config
+    ))]
+    pub fn new(config: Config, etcd: Client) -> Self {
         Self {
+            config,
             workers: HashMap::new(),
             tasks: HashMap::new(),
             etcd,
@@ -92,19 +102,26 @@ impl SimpleScheduler {
                     };
 
                     self.workers.insert(current_state.worker_id.clone(), current_state);
+
+                    dbg!(&self.workers);
                 }
             }
         }
     }
 
     #[tracing::instrument(name = "SimpleScheduler::schedule", skip_all)]
-    async fn schedule(&self, taskset: TaskSet) -> Result<()> {
+    async fn schedule(&mut self, taskset: TaskSet) -> Result<()> {
+        self.remove_dead_workers();
+
+        // TODO: this is wrong, if a worker is already running a task
+        // its state should be modified.
+
         match self.select_worker(&taskset)? {
             None => Err(anyhow::anyhow!("no workers are able to execute the tasks")),
             Some(worker_id) => {
                 let key = format!("workers/tasksets/{}/{}", worker_id, taskset.name);
 
-                info!(?worker_id, taskset_name = ?taskset.name, "scheduling taskset");
+                info!(?worker_id, taskset_name = ?taskset.name, "assigning taskset to worker");
 
                 self.etcd
                     .put(PutRequest::new(key, taskset.encode_to_vec()))
@@ -112,6 +129,23 @@ impl SimpleScheduler {
 
                 Ok(())
             }
+        }
+    }
+
+    #[tracing::instrument(name = "SimpleScheduler::remove_dead_workers", skip_all)]
+    fn remove_dead_workers(&mut self) {
+        let mut workers_to_remove = vec![];
+
+        let now = Utc::now().timestamp_millis();
+        for worker in self.workers.values() {
+            if worker.timestamp - now > self.config.heartbeat_timeout_secs.as_millis() as i64 {
+                workers_to_remove.push(worker.worker_id.clone());
+            }
+        }
+
+        for worker_id in workers_to_remove {
+            info!(?worker_id, "worker has not sent a heartbeat in a while");
+            self.workers.remove(&worker_id);
         }
     }
 
