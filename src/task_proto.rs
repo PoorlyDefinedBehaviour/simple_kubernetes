@@ -3,12 +3,10 @@ pub mod task_proto {
 }
 
 pub use task_proto::*;
-use uuid::Uuid;
 
 use crate::definition;
 use anyhow::{Context, Result};
 
-pub type TaskId = String;
 pub type TaskSetName = String;
 
 impl From<definition::Definition> for TaskSet {
@@ -23,7 +21,6 @@ impl From<definition::Definition> for TaskSet {
 impl From<definition::ContainerSpec> for Task {
     fn from(input: definition::ContainerSpec) -> Self {
         Self {
-            id: Uuid::new_v4().to_string(),
             container_id: String::new(),
             name: input.name,
             state: State::Pending.into(),

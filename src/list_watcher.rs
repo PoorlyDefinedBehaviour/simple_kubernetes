@@ -1,7 +1,5 @@
-use crate::{
-    task_proto::{Task, TaskSet},
-    worker_proto,
-};
+use crate::{task_proto, worker_proto};
+use anyhow::Context;
 use etcd_rs::{Client, KeyRange, KeyValueOp, WatchInbound, WatchOp};
 use prost::{DecodeError, Message};
 use std::time::Duration;
@@ -48,8 +46,9 @@ where
                     info!("fetching whole range for prefix");
                     let range_response = match self
                        .etcd
-                        .get(KeyRange::range(prefix.clone(), vec![0]))
+                        .get(KeyRange::prefix(prefix.clone()))
                         .await
+                        .context("fetching keys by prefix")
                         {
                             Err(error) => {
                                 error!(?prefix, ?error, "error listing prefix");
@@ -74,7 +73,6 @@ where
                         };
                     }
                 },
-                // TODO: i think this may be broken, are events being received?
                 message = stream.inbound() => {
                     match message {
                         WatchInbound::Ready(watch_response) => {
@@ -96,7 +94,14 @@ where
                         },
                         WatchInbound::Interrupted(error) => {
                             error!(?error, "error watching prefix");
-                            return;
+
+                            let (new_stream, _cancel) = self
+                                .etcd
+                                .watch(KeyRange::prefix(prefix.clone()))
+                                .await
+                                .expect("watch by prefix");
+
+                            stream = new_stream;
                         },
                         WatchInbound::Closed => {
                             info!("prefix stream closed");
@@ -109,26 +114,18 @@ where
     }
 }
 
-impl TryFrom<etcd_rs::KeyValue> for TaskSet {
+impl TryFrom<etcd_rs::KeyValue> for task_proto::TaskSet {
     type Error = DecodeError;
 
-    fn try_from(value: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
-        TaskSet::decode(value.value.as_ref())
-    }
-}
-
-impl TryFrom<etcd_rs::KeyValue> for Task {
-    type Error = DecodeError;
-
-    fn try_from(value: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
-        Task::decode(value.value.as_ref())
+    fn try_from(kv: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
+        task_proto::TaskSet::decode(kv.value.as_ref())
     }
 }
 
 impl TryFrom<etcd_rs::KeyValue> for worker_proto::CurrentState {
     type Error = DecodeError;
 
-    fn try_from(value: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
-        worker_proto::CurrentState::decode(value.value.as_ref())
+    fn try_from(kv: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
+        worker_proto::CurrentState::decode(kv.value.as_ref())
     }
 }

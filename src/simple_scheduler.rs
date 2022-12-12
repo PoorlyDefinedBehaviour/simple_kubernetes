@@ -10,8 +10,8 @@ use tracing::{error, info};
 use crate::list_watcher::ListWatcher;
 
 use crate::task_proto::{self, TaskSet, TaskSetName};
-use crate::worker::WorkerId;
-use crate::worker_proto;
+
+use crate::worker_proto::{self, WorkerId};
 
 struct WorkerTasks {
     worker_id: Option<WorkerId>,
@@ -77,7 +77,7 @@ impl SimpleScheduler {
                         Some(v) => v
                     };
 
-                    self.tasks.insert(taskset.name.clone(), WorkerTasks{worker_id: None, taskset:taskset.clone()});
+                    self.tasks.insert(taskset.name.clone(), WorkerTasks{ worker_id: None, taskset:taskset.clone() });
                     if let Err(error) = self.schedule(taskset).await {
                         error!(?error, "unable to schedule tasks");
                     }
@@ -103,6 +103,8 @@ impl SimpleScheduler {
             None => Err(anyhow::anyhow!("no workers are able to execute the tasks")),
             Some(worker_id) => {
                 let key = format!("workers/tasksets/{}/{}", worker_id, taskset.name);
+
+                info!(?worker_id, taskset_name = ?taskset.name, "scheduling taskset");
 
                 self.etcd
                     .put(PutRequest::new(key, taskset.encode_to_vec()))

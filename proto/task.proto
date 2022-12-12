@@ -11,7 +11,6 @@ enum State {
 }
 
 message Task {
-  string id = 1;
   string name = 2;
   State state = 3;
   string image = 4;

@@ -23,10 +23,8 @@ use crate::{
     list_watcher::ListWatcher,
     node::Node,
     task_proto::{State, Task, TaskSet},
-    worker_proto,
+    worker_proto::{self, WorkerId},
 };
-
-pub type WorkerId = String;
 
 #[derive(Debug)]
 enum ReconciliationAction {
@@ -35,30 +33,19 @@ enum ReconciliationAction {
     Create { task: Task },
 }
 
-/// Represents a list of tasksets running in this node.
-#[derive(Debug)]
-struct TaskSetList {
-    tasksets: LocalTaskSet,
-}
-
-#[derive(Debug)]
-struct LocalTaskSet {
-    tasks: Vec<LocalTask>,
-}
-
 /// Represents a container running in this node.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LocalTask {
-    container_id: String,
-    state: i32,
-    image: String,
-    name: String,
+    pub container_id: Option<String>,
+    pub state: i32,
+    pub image: String,
+    pub name: String,
 }
 
 impl LocalTask {
     fn running(container_id: String, task: Task) -> Self {
         Self {
-            container_id,
+            container_id: Some(container_id),
             state: State::Running.as_i32(),
             image: task.image,
             name: task.name,
@@ -268,7 +255,7 @@ impl Worker {
                 Some(entry) => {
                     if task_desired_state_has_changed(&task, entry) {
                         actions.push(ReconciliationAction::Recreate {
-                            container_id: entry.container_id.clone(),
+                            container_id: entry.container_id.clone().unwrap(),
                             task: task.clone(),
                         });
                     }
@@ -281,7 +268,7 @@ impl Worker {
         for (container_name, container_entry) in self.state.iter() {
             if !containers_seen.contains(container_name) {
                 actions.push(ReconciliationAction::Remove {
-                    container_id: container_entry.container_id.clone(),
+                    container_id: container_entry.container_id.clone().unwrap(),
                 });
             }
         }
@@ -415,6 +402,8 @@ impl Worker {
                 .collect(),
         };
 
+        dbg!(&current_state);
+
         let _ = self
             .etcd
             .put(PutRequest::new(key, current_state.encode_to_vec()))
@@ -431,7 +420,7 @@ impl TryFrom<docker_api::models::ContainerSummary> for LocalTask {
         let container_name = input.names.expect("every container must have a name")[0].clone();
 
         Ok(LocalTask {
-            container_id: input.id.unwrap_or_default(),
+            container_id: input.id,
             state: State::try_from(input.state.unwrap_or_default().as_ref())?.into(),
             image: input.image.expect("image should exist"),
             name: format_container_name(&container_name).to_owned(),

@@ -5,9 +5,9 @@ metadata:
 spec:
   containers:
     - image: poorlydefinedbehaviour/kubia
-      name: kubia-1
+      name: kubia-2
       ports:
-        - containerPort: 8894
+        - containerPort: 8895
           protocol: TCP
       resources:
         requests:

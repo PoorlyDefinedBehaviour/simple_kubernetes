@@ -20,9 +20,17 @@ enum State {
   failed = 3;
   created = 4;
 }
+
+message TaskSetList {
+  repeated TaskSet tasksets = 1;
+}
+
+message TaskSet {
+  string name = 1;
+  repeated Task tasks = 2;
+} 
   
 message Task {
-  string id = 1;
   string name = 2;
   State state = 3;
   string image = 4;

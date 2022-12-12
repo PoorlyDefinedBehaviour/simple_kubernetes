@@ -2,6 +2,8 @@ pub mod worker_proto {
     tonic::include_proto!("worker");
 }
 
+pub type WorkerId = String;
+
 pub use worker_proto::*;
 
 use crate::worker::LocalTask;
@@ -15,7 +17,6 @@ impl CurrentState {
 impl From<LocalTask> for Task {
     fn from(input: LocalTask) -> Self {
         Self {
-            id: input.id,
             name: input.name,
             state: input.state,
             image: input.image,
