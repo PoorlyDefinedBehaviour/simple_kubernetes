@@ -76,6 +76,8 @@ impl SimpleScheduler {
         info!(?workers_current_state_key, "spawning tasks list watcher");
         tokio::spawn(workers_list_watcher.list_and_watch(workers_current_state_key));
 
+        let mut ensure_state_consistency_interval = tokio::time::interval(Duration::from_secs(30));
+
         loop {
             select! {
                 message = tasks_rx.recv() => {
@@ -104,6 +106,11 @@ impl SimpleScheduler {
                     self.workers.insert(current_state.worker_id.clone(), current_state);
 
                     dbg!(&self.workers);
+                },
+                _ = ensure_state_consistency_interval.tick() => {
+                    if let Err(error) = self.ensure_state_consistency().await {
+                        error!(?error, "unable to ensure state consistency");
+                    }
                 }
             }
         }
@@ -175,5 +182,48 @@ impl SimpleScheduler {
             worker_with_the_minimum_amount_of_tasks.map(|(worker_id, _)| worker_id.clone());
 
         Ok(worker_id)
+    }
+
+    #[tracing::instrument(name = "SimpleScheduler::ensure_state_consistency", skip_all)]
+    async fn ensure_state_consistency(&mut self) -> Result<()> {
+        let (tasksets, worker_states) = {
+            let (tasksets, worker_states) =
+                tokio::join!(self.get_tasksets(), self.get_worker_states());
+            (tasksets?, worker_states?)
+        };
+
+        for (_, worker_tasks) in self.tasks.iter() {
+            match worker_states.get(worker_tasks.worker_id.as_ref().unwrap()) {
+                None => {
+                    todo!()
+                }
+                Some(state) => {}
+            }
+        }
+
+        todo!()
+    }
+
+    #[tracing::instrument(name = "SimpleScheduler::get_tasksets", skip_all)]
+    async fn get_tasksets(&self) -> Result<Vec<task_proto::TaskSet>> {
+        let range_response = self.etcd.get_by_prefix("workers/tasksets").await?;
+        let mut tasksets = Vec::with_capacity(range_response.kvs.len());
+        for kv in range_response.kvs {
+            tasksets.push(TaskSet::decode(kv.value.as_ref())?);
+        }
+        info!("got {} tasksets", tasksets.len());
+        Ok(tasksets)
+    }
+
+    #[tracing::instrument(name = "SimpleScheduler::get_worker_states", skip_all)]
+    async fn get_worker_states(&self) -> Result<HashMap<WorkerId, worker_proto::CurrentState>> {
+        let range_response = self.etcd.get_by_prefix("workers/current_state").await?;
+        let mut states = HashMap::new();
+        for kv in range_response.kvs {
+            let current_state = worker_proto::CurrentState::decode(kv.value.as_ref())?;
+            states.insert(current_state.worker_id.clone(), current_state);
+        }
+        info!("got {} states", states.len());
+        Ok(states)
     }
 }
