@@ -17,6 +17,7 @@ message Task {
   string image = 4;
   repeated PortBinding port_bindings = 5;
   string container_id = 6;
+  Resources resources = 7;
 }
 
 message PortBinding {
@@ -24,6 +25,17 @@ message PortBinding {
   string protocol = 2;
 }
 
-message Tasks {
-  repeated Task tasks = 1;
+message TaskSet {
+  string name = 1;
+  repeated Task tasks = 2;
+}
+
+message Resources {
+  ResourcesSpec requests = 1;
+  ResourcesSpec limits = 2;
+}
+
+message ResourcesSpec {
+  string memory = 1;
+  string cpu = 2;
 }

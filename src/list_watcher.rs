@@ -1,4 +1,7 @@
-use crate::task_proto::Tasks;
+use crate::{
+    task_proto::{Task, TaskSet},
+    worker_proto,
+};
 use etcd_rs::{Client, KeyRange, KeyValueOp, WatchInbound, WatchOp};
 use prost::{DecodeError, Message};
 use std::time::Duration;
@@ -106,10 +109,26 @@ where
     }
 }
 
-impl TryFrom<etcd_rs::KeyValue> for Tasks {
+impl TryFrom<etcd_rs::KeyValue> for TaskSet {
     type Error = DecodeError;
 
     fn try_from(value: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
-        Tasks::decode(value.value.as_ref())
+        TaskSet::decode(value.value.as_ref())
+    }
+}
+
+impl TryFrom<etcd_rs::KeyValue> for Task {
+    type Error = DecodeError;
+
+    fn try_from(value: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
+        Task::decode(value.value.as_ref())
+    }
+}
+
+impl TryFrom<etcd_rs::KeyValue> for worker_proto::CurrentState {
+    type Error = DecodeError;
+
+    fn try_from(value: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
+        worker_proto::CurrentState::decode(value.value.as_ref())
     }
 }

@@ -35,3 +35,13 @@ cargo r --bin worker -- config -f worker.yml
 ```
 cargo r --bin cli -- apply -f 1.yml -e http://[::1]:50051
 ```
+
+// manager
+// also keeps workers desired state in memory in case a container
+// needs to be moved from one worker to another.
+// put workers/desired_state/{{worker_id}} state
+// watch workers/current_state/*
+
+// worker
+// put workers/current_state/{{worker_id}} state
+// watch workers/desired_state/{{worker_id}}

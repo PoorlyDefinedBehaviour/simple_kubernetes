@@ -1,14 +1,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use simple_kubernetes::manager_proto::{
-    self, ApplyReply, ApplyRequest, RegisterWorkerReply, RegisterWorkerRequest,
-};
+use simple_kubernetes::manager_proto::{self, ApplyReply, ApplyRequest};
 use simple_kubernetes::{
     definition::Definition,
     manager::{Config, Manager},
     simple_scheduler::SimpleScheduler,
 };
-use tracing::{error, info, Level};
+use tracing::{info, Level};
 
 use tonic::{transport::Server, Request, Response, Status};
 
@@ -42,37 +40,6 @@ impl ManagerService {
 
 #[tonic::async_trait]
 impl manager_proto::manager_server::Manager for ManagerService {
-    #[tracing::instrument(name = "ManagerService::register_worker", skip_all, fields(
-        request = ?request
-    ))]
-    async fn register_worker(
-        &self,
-        request: Request<RegisterWorkerRequest>,
-    ) -> Result<Response<RegisterWorkerReply>, Status> {
-        async fn do_register_worker(
-            request: Request<RegisterWorkerRequest>,
-            manager: &Manager,
-        ) -> Result<manager_proto::RegisterWorkerReply, Status> {
-            let request = request.into_inner();
-
-            let remote_worker = request
-                .try_into()
-                .map_err(|err: anyhow::Error| Status::invalid_argument(err.to_string()))?;
-
-            manager.register_worker(remote_worker).await;
-
-            Ok(manager_proto::RegisterWorkerReply {})
-        }
-
-        match do_register_worker(request, &self.manager).await {
-            Err(error) => {
-                error!(?error, "error registering worker");
-                Err(error)
-            }
-            Ok(reply) => Ok(Response::new(reply)),
-        }
-    }
-
     #[tracing::instrument(name = "ManagerService::apply", skip_all, fields(
         request = ?request
     ))]
@@ -103,11 +70,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             info!(addr = ?addr, "starting manager server");
 
-            let manager = Manager::new(
-                Config::from_file(file).await?,
-                Box::new(SimpleScheduler::new()),
-            )
+            let etcd = etcd_rs::Client::connect(etcd_rs::ClientConfig::new([
+                "http://127.0.0.1:2379".into(),
+                "http://127.0.0.1:2380".into(),
+            ]))
             .await?;
+
+            info!("connected to etcd");
+
+            let manager = Manager::new(Config::from_file(file).await?, etcd.clone());
+
+            let scheduler = SimpleScheduler::new(etcd);
+            tokio::spawn(scheduler.watch_cluster_state_changes());
+
             let svc =
                 manager_proto::manager_server::ManagerServer::new(ManagerService::new(manager));
 

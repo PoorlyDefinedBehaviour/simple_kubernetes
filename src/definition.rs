@@ -25,6 +25,19 @@ pub struct ContainerSpec {
     pub image: String,
     pub name: ContainerName,
     pub ports: Vec<Port>,
+    pub resources: Resources,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Resources {
+    pub requests: ResourcesSpec,
+    pub limits: ResourcesSpec,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ResourcesSpec {
+    pub memory: String,
+    pub cpu: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

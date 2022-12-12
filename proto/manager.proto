@@ -3,16 +3,7 @@ syntax = "proto3";
 package manager;
 
 service Manager {
-  rpc RegisterWorker (RegisterWorkerRequest) returns (RegisterWorkerReply) {}
   rpc Apply (ApplyRequest) returns (ApplyReply) {}
-}
-
-message RegisterWorkerRequest {
-  string worker_id = 1;
-}
-
-message RegisterWorkerReply {
-
 }
 
 message ApplyRequest {

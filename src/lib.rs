@@ -4,10 +4,10 @@ pub mod manager;
 pub mod list_watcher;
 pub mod manager_proto;
 pub mod node;
-pub mod scheduler;
 pub mod simple_scheduler;
 pub mod task_proto;
 pub mod worker;
+pub mod worker_proto;
 
 #[cfg(test)]
 mod definition_test;
