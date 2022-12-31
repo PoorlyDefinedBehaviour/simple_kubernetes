@@ -104,8 +104,6 @@ impl SimpleScheduler {
                     };
 
                     self.workers.insert(current_state.worker_id.clone(), current_state);
-
-                    dbg!(&self.workers);
                 },
                 _ = ensure_state_consistency_interval.tick() => {
                     if let Err(error) = self.ensure_state_consistency().await {
@@ -201,7 +199,7 @@ impl SimpleScheduler {
             }
         }
 
-        todo!()
+        Ok(())
     }
 
     #[tracing::instrument(name = "SimpleScheduler::get_tasksets", skip_all)]

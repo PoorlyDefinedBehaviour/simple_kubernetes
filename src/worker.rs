@@ -390,9 +390,7 @@ impl Worker {
     pub async fn pull_image(&self, image: &str) -> Result<(), RunTaskError> {
         info!("pulling image");
 
-        let pull_opts = PullOpts::builder()
-            .image("poorlydefinedbehaviour/kubia")
-            .build();
+        let pull_opts = PullOpts::builder().image(image).build();
 
         let images = self.docker_client.images();
 
@@ -428,8 +426,6 @@ impl Worker {
                 .collect(),
         };
 
-        dbg!(&current_state);
-
         let _ = self
             .etcd
             .put(PutRequest::new(key, current_state.encode_to_vec()))
@@ -459,8 +455,6 @@ impl Worker {
                 .map(|(_, task)| worker_proto::Task::from(task.clone()))
                 .collect(),
         };
-
-        dbg!(&current_state);
 
         let range_response = self.etcd.get(KeyRange::key(key)).await?;
 
