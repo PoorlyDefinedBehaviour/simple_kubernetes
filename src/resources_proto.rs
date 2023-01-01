@@ -1,33 +1,43 @@
-pub mod task_proto {
+pub mod resources_proto {
     tonic::include_proto!("task");
 }
 
+use chrono::Utc;
 use prost::{DecodeError, Message};
-pub use task_proto::*;
+pub use resources_proto::*;
 
 use crate::definition;
 use anyhow::{Context, Result};
 
-pub type TaskSetName = String;
+pub type TaskName = String;
 
-impl From<definition::Definition> for TaskSet {
+impl From<definition::Definition> for Task {
     fn from(input: definition::Definition) -> Self {
         Self {
             name: input.metadata_name().to_owned(),
-            tasks: input.spec.containers.into_iter().map(Task::from).collect(),
+            containers: input
+                .spec
+                .containers
+                .into_iter()
+                .map(Container::from)
+                .collect(),
+            node: None,
+            timestamp: Utc::now().timestamp_millis(),
         }
     }
 }
 
-impl From<definition::ContainerSpec> for Task {
+impl From<definition::ContainerSpec> for Container {
     fn from(input: definition::ContainerSpec) -> Self {
         Self {
-            container_id: String::new(),
             name: input.name,
-            state: State::Pending.into(),
             image: input.image,
             port_bindings: input.ports.into_iter().map(PortBinding::from).collect(),
             resources: Some(Resources::from(input.resources)),
+            status: Some(resources_proto::Status {
+                container_id: String::new(),
+                state: resources_proto::State::Pending.into(),
+            }),
         }
     }
 }
@@ -72,15 +82,26 @@ impl State {
     }
 }
 
-impl TryFrom<&str> for State {
+impl TryFrom<&docker_api::models::ContainerSummary> for State {
     type Error = anyhow::Error;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let state = match value {
+    fn try_from(value: &docker_api::models::ContainerSummary) -> Result<Self, Self::Error> {
+        let state = match value.state.as_deref().unwrap() {
             // One of created, restarting, running, removing, paused, exited, or dead
             "running" | "restarting" => State::Running,
-            "exited" => State::Failed,
-            "paused" | "dead" => State::Failed,
+            "exited" => {
+                if value
+                    .status
+                    .as_ref()
+                    .map(|s| s.contains("Exited (0)"))
+                    .unwrap_or(false)
+                {
+                    State::Completed
+                } else {
+                    State::Failed
+                }
+            }
+            "paused" | "removing" | "dead" => State::Failed,
             "created" => State::Created,
             s => return Err(anyhow::anyhow!("unexpected state. state={}", s)),
         };
@@ -89,24 +110,35 @@ impl TryFrom<&str> for State {
     }
 }
 
-impl TaskSet {
+impl Task {
     /// Returns the amount of memory needed to run every container in the set.
     pub fn necessary_memory_in_bytes(&self) -> Result<u64> {
         let mut memory_requests = 0;
-        for task in self.tasks.iter() {
-            memory_requests += task.memory_requests_in_bytes()?;
+        for container in self.containers.iter() {
+            memory_requests += container.memory_requests_in_bytes()?;
         }
         Ok(memory_requests)
     }
 }
 
-impl Task {
+impl Container {
+    pub fn id(&self) -> Option<&str> {
+        self.status
+            .as_ref()
+            .map(|status| status.container_id.as_ref())
+    }
     pub fn is_running(&self) -> bool {
-        self.state == State::Running.as_i32()
+        self.status
+            .as_ref()
+            .map(|status| status.state == State::Running.as_i32())
+            .unwrap_or(false)
     }
 
     pub fn is_completed(&self) -> bool {
-        self.state == State::Completed.as_i32()
+        self.status
+            .as_ref()
+            .map(|status| status.state == State::Completed.as_i32())
+            .unwrap_or(false)
     }
 
     /// Returns the amount of memory requested to run the container.
@@ -150,10 +182,10 @@ fn split_in_n_and_unit(repr: &str) -> Result<(u64, &str)> {
     Ok((n, s))
 }
 
-impl TryFrom<etcd_rs::KeyValue> for task_proto::TaskSet {
+impl TryFrom<etcd_rs::KeyValue> for resources_proto::Task {
     type Error = DecodeError;
 
     fn try_from(kv: etcd_rs::KeyValue) -> Result<Self, Self::Error> {
-        task_proto::TaskSet::decode(kv.value.as_ref())
+        resources_proto::Task::decode(kv.value.as_ref())
     }
 }

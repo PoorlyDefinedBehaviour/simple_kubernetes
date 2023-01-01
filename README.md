@@ -21,13 +21,13 @@ tar -xvzf etcd.tar.gz --strip-components=1 -C etcd
 ## Starting the manager
 
 ```
-cargo r --bin manager -- config -f manager.yml
+RUST_LOG=info cargo r --bin manager -- config -f scheduler.yml
 ```
 
 ## Starting a worker
 
 ```
-cargo r --bin worker -- config -f worker.yml
+RUST_LOG=info cargo r --bin worker -- config -f worker.yml
 ```
 
 ## Creating resources

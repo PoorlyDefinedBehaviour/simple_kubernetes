@@ -1,11 +1,11 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use simple_kubernetes::manager_proto::{self, ApplyReply, ApplyRequest};
+use simple_kubernetes::manager_proto::{
+    self, ApplyReply, ApplyRequest, NodeHeartbeatRequest, NodeHeartbeatResponse,
+};
 use simple_kubernetes::simple_scheduler;
 use simple_kubernetes::{
-    definition::Definition,
-    manager::{Config, Manager},
-    simple_scheduler::SimpleScheduler,
+    definition::Definition, manager::Manager, simple_scheduler::SimpleScheduler,
 };
 use tracing::{info, Level};
 
@@ -57,6 +57,23 @@ impl manager_proto::manager_server::Manager for ManagerService {
 
         Ok(Response::new(manager_proto::ApplyReply {}))
     }
+
+    #[tracing::instrument(name = "ManagerService::node_heartbeat", skip_all, fields(
+        request = ?request
+    ))]
+    async fn node_heartbeat(
+        &self,
+        request: Request<NodeHeartbeatRequest>,
+    ) -> Result<Response<NodeHeartbeatResponse>, Status> {
+        let request = request.into_inner();
+
+        self.manager
+            .node_heartbeat(request)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
+
+        Ok(Response::new(manager_proto::NodeHeartbeatResponse {}))
+    }
 }
 
 #[tokio::main]
@@ -79,10 +96,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             info!("connected to etcd");
 
-            let manager_config = Config::from_file(file).await?;
-            let scheduler_config = simple_scheduler::Config::from(&manager_config);
+            let scheduler_config = simple_scheduler::Config::from_file(file).await?;
 
-            let manager = Manager::new(manager_config, etcd.clone());
+            let manager = Manager::new(etcd.clone());
 
             let scheduler = SimpleScheduler::new(scheduler_config, etcd);
             tokio::spawn(scheduler.watch_cluster_state_changes());

@@ -59,6 +59,7 @@ where
                     info!("fetched {} entries", range_response.kvs.len());
 
                     for kv in range_response.kvs {
+
                         let t = match T::try_from(kv) {
                             Err(error) => {
                                 error!(?error, "unexpected data format, this is a bug.");

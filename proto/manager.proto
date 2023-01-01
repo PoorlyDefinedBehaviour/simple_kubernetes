@@ -4,6 +4,7 @@ package manager;
 
 service Manager {
   rpc Apply (ApplyRequest) returns (ApplyReply) {}
+  rpc NodeHeartbeat(NodeHeartbeatRequest) returns (NodeHeartbeatResponse) {}
 }
 
 message ApplyRequest {
@@ -11,5 +12,41 @@ message ApplyRequest {
 }
 
 message ApplyReply {
+
+}
+
+message NodeHeartbeatRequest {
+  string worker_id = 1;
+  uint64 max_memory = 2;
+  uint64 memory_allocated = 3;
+  uint64 max_disk_size = 4;
+  uint64 disk_allocated = 5;
+  int64 timestamp = 6;
+  repeated Task tasks = 7;
+}
+
+message Task {
+  string name = 1;
+  repeated Container containers = 2;
+}
+
+message Container {
+  string name = 1;
+  Status status = 2;
+}
+
+message Status {
+  State state = 1;
+}
+
+enum State {
+  pending = 0;
+  running = 1;
+  completed = 2;
+  failed = 3;
+  created = 4;
+}
+
+message NodeHeartbeatResponse {
 
 }

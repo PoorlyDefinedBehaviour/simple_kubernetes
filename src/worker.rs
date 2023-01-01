@@ -4,9 +4,9 @@ use docker_api::{
     opts::{ContainerCreateOpts, ContainerListOpts, ContainerRemoveOpts, PublishPort, PullOpts},
     Docker,
 };
-use etcd_rs::{Client, ClientConfig, KeyRange, KeyValueOp, PutRequest};
+use etcd_rs::{Client, ClientConfig, KeyRange, KeyValueOp};
 use futures_util::stream::StreamExt;
-use prost::Message;
+
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
@@ -16,49 +16,28 @@ use std::{
     time::Duration,
 };
 use tokio::select;
+use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
 use crate::{
+    constants::WORKER_TASK_LIST_KEY,
     definition::ContainerName,
     list_watcher::ListWatcher,
+    manager_proto,
     node::Node,
-    task_proto::{State, Task, TaskSet},
-    worker_proto::{self, WorkerId},
+    resources_proto::{self, State, Task},
 };
+
+pub type WorkerId = String;
 
 #[derive(Debug)]
 enum ReconciliationAction {
-    Remove { container_id: String },
-    Recreate { container_id: String, task: Task },
-    Create { task: Task },
-}
-
-/// Represents a container running in this node.
-#[derive(Debug, Clone)]
-pub struct LocalTask {
-    pub container_id: Option<String>,
-    pub state: i32,
-    pub image: String,
-    pub name: String,
-}
-
-impl LocalTask {
-    fn running(container_id: String, task: Task) -> Self {
-        Self {
-            container_id: Some(container_id),
-            state: State::Running.as_i32(),
-            image: task.image,
-            name: task.name,
-        }
-    }
-
-    fn is_running(&self) -> bool {
-        self.state == State::Running.as_i32()
-    }
-
-    fn is_completed(&self) -> bool {
-        self.state == State::Completed.as_i32()
-    }
+    Remove {
+        container_id: String,
+    },
+    Create {
+        container: resources_proto::Container,
+    },
 }
 
 /// Runs as a daemon on every node. Responsible for creating/stopping/etc containers.
@@ -66,12 +45,14 @@ pub struct Worker {
     config: Config,
     /// The node that the worker is running on.
     node: Node,
-    /// The containers currently running in this node.
-    state: HashMap<ContainerName, LocalTask>,
+    /// The tasks currently running in this node.
+    tasks: HashMap<ContainerName, resources_proto::Task>,
     /// Client used to communicate with the docker daemon.
     docker_client: Docker,
     /// Client used to communicate with etcd.
     etcd: Client,
+    /// Client used to communicate with the cluster manager.
+    manager_client: manager_proto::manager_client::ManagerClient<Channel>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +104,12 @@ impl Worker {
     pub async fn start(config: Config) -> Result<()> {
         info!("starting worker control loop");
 
+        let manager_client = manager_proto::manager_client::ManagerClient::connect(format!(
+            "http://{}",
+            config.manager.addr
+        ))
+        .await?;
+
         let etcd_endpoints: Vec<_> = config
             .etcd
             .endpoints
@@ -138,9 +125,10 @@ impl Worker {
         let mut worker = Self {
             config,
             node: Node::new(),
-            state: HashMap::new(),
+            tasks: HashMap::new(),
             docker_client,
             etcd,
+            manager_client,
         };
 
         worker.build_state_from_existing_containers().await?;
@@ -151,42 +139,86 @@ impl Worker {
         Ok(())
     }
 
-    #[tracing::instrument(name = "worker::build_state_from_existing_containers", skip_all)]
+    #[tracing::instrument(name = "Worker::get_containers_running_in_node", skip_all)]
+    async fn get_containers_running_in_node(
+        &self,
+    ) -> Result<Vec<docker_api::models::ContainerSummary>> {
+        // List containers running in the mchine.
+        let containers = self.docker_client.containers();
+
+        let summaries = containers
+            .list(&ContainerListOpts::builder().all(true).build())
+            .await?;
+
+        Ok(summaries)
+    }
+
+    #[tracing::instrument(name = "Worker::build_state_from_existing_containers", skip_all)]
     async fn build_state_from_existing_containers(&mut self) -> Result<()> {
         info!("building state from existing containers");
 
-        let containers_that_belong_to_worker = {
-            let current_state = self.get_current_state().await?;
+        let tasks = self.get_tasks_beloging_to_worker().await?;
 
-            if let Some(current_state) = current_state {
-                current_state
-                    .tasks
-                    .into_iter()
-                    .map(|task| task.name)
-                    .collect()
-            } else {
-                HashSet::new()
-            }
-        };
+        // Reset the local state.
+        self.tasks.clear();
 
-        // State is unknown.
-        self.state.clear();
-
-        let containers = self.docker_client.containers();
-        for container_summary in containers
-            .list(&ContainerListOpts::builder().all(true).build())
+        let summaries: HashMap<_, _> = self
+            .get_containers_running_in_node()
             .await?
-        {
-            let task = LocalTask::try_from(container_summary)
-                .expect("summary conversion to task should never fail");
+            .into_iter()
+            .map(|summary| (container_name(&summary).to_owned(), summary))
+            .collect();
 
-            if !containers_that_belong_to_worker.contains(&task.name) {
-                continue;
+        for mut task in tasks.into_iter() {
+            for container in task.containers.iter_mut() {
+                if container.status.is_none() {
+                    container.status = Some(resources_proto::Status {
+                        state: resources_proto::State::Pending.as_i32(),
+                        container_id: String::new(),
+                    });
+                }
+
+                match summaries.get(&container.name) {
+                    // Container does not exist in the node at the moment.
+                    None => {
+                        container.status.as_mut().unwrap().state = State::Pending.as_i32();
+                    }
+                    // Container exists in the node.
+                    // Is the actual container state in sync with the stored state?
+                    Some(summary) => {
+                        let state = State::try_from(summary)?;
+                        let status = container.status.as_mut().unwrap();
+                        status.state = state.as_i32();
+                        status.container_id = summary.id.clone().unwrap_or_default();
+                    }
+                };
             }
 
-            self.state.insert(task.name.clone(), task);
+            self.tasks.insert(task.name.clone(), task);
         }
 
+        Ok(())
+    }
+
+    #[tracing::instrument(name = "Worker::send_heartbeat", skip_all)]
+    async fn send_heartbeat(&mut self) -> Result<()> {
+        self.manager_client
+            .node_heartbeat(manager_proto::NodeHeartbeatRequest {
+                worker_id: self.config.id.to_string(),
+                max_memory: self.node.max_memory(),
+                memory_allocated: self.node.memory_allocated(),
+                max_disk_size: self.node.max_disk_size(),
+                disk_allocated: self.node.disk_allocated(),
+                timestamp: Utc::now().timestamp_millis(),
+                tasks: self
+                    .tasks
+                    .values()
+                    .cloned()
+                    .map(manager_proto::Task::from)
+                    .collect(),
+            })
+            .await
+            .context("sending node heartbeat")?;
         Ok(())
     }
 
@@ -194,7 +226,7 @@ impl Worker {
     async fn watch_cluster_state_changes(mut self) {
         // The desired state for this node. Changes to the desired state are
         // appended to the work queue before being processed.
-        let (work_tx, mut work_rx) = tokio::sync::mpsc::channel::<TaskSet>(100);
+        let (work_tx, mut work_rx) = tokio::sync::mpsc::channel::<Task>(100);
         let list_watcher = ListWatcher::new(
             // TODO: make configurable
             Duration::from_secs(15),
@@ -202,27 +234,28 @@ impl Worker {
             self.etcd.clone(),
         );
 
+        let mut heartbeat_interval =
+            tokio::time::interval(Duration::from_secs(self.config.heartbeat.interval));
+
         let mut build_state_from_existing_containers_interval =
             tokio::time::interval(Duration::from_secs(10));
 
-        let mut store_current_state_interval = tokio::time::interval(Duration::from_secs(10));
-
-        let desired_state_key = format!("workers/tasksets/{}", self.config.id);
+        let desired_state_key = format!("{WORKER_TASK_LIST_KEY}/{}", self.config.id);
 
         info!(?desired_state_key, "spawning list watcher");
         tokio::spawn(list_watcher.list_and_watch(desired_state_key));
 
         loop {
             select! {
-                _ = store_current_state_interval.tick() => {
-                    if let Err(error) = self.store_current_state().await {
-                        error!(?error, "unable to store current state");
+                _ = heartbeat_interval.tick() => {
+                    if let Err(error) = self.send_heartbeat().await {
+                        error!(?error, "unable to send heartbeat");
                     }
                 },
                 _ = build_state_from_existing_containers_interval.tick() => {
-                    // if let Err(error) = self.build_state_from_existing_containers().await {
-                    //     error!(?error, "unable to build state from existing containers");
-                    // }
+                    if let Err(error) = self.build_state_from_existing_containers().await {
+                        error!(?error, "unable to build state from existing containers");
+                    }
                 },
                 work_queue_item = work_rx.recv() => {
                     let desired_state_definition = match work_queue_item {
@@ -234,7 +267,13 @@ impl Worker {
                     };
 
                     let state_reconciliation_actions =
-                        self.state_reconciliation_actions(&desired_state_definition);
+                        match self.state_reconciliation_actions(&desired_state_definition).await {
+                            Err(error) => {
+                                error!(?error, "unable to generate state reconciliation actions");
+                                continue;
+                            }
+                            Ok(v) => v
+                        };
 
                     for action in state_reconciliation_actions {
                         match action {
@@ -243,63 +282,69 @@ impl Worker {
                                     error!(?error, ?container_id, "unable to remove container");
                                 }
                             }
-                            ReconciliationAction::Create { task } => {
-                                if let Err(error) = self.create_container(task).await {
+                            ReconciliationAction::Create { container } => {
+                                if let Err(error) = self.create_container(container).await {
                                     error!(?error, "unable to create container");
                                 }
                             }
-                            ReconciliationAction::Recreate { container_id, task } => {
-                                if let Err(error) = self.recreate_container(&container_id, task).await {
-                                    error!(?error, ?container_id, "unable to recreate container");
-                                }
-                            }
-                        }
-                    }
 
-                    // No need to store the same state at the next tick.
-                    store_current_state_interval.reset();
-                    if let Err(error) = self.store_current_state().await {
-                        error!(?error, "unable to store current state");
+                        }
                     }
                 }
             }
         }
     }
 
-    fn state_reconciliation_actions(&self, desired_state: &TaskSet) -> Vec<ReconciliationAction> {
+    async fn state_reconciliation_actions(
+        &self,
+        new_task: &Task,
+    ) -> Result<Vec<ReconciliationAction>> {
         let mut actions = Vec::new();
         let mut containers_seen = HashSet::new();
 
-        for task in desired_state.tasks.iter() {
-            // TODO: cloning strings, can this be avoided?
-            containers_seen.insert(task.name.clone());
-
-            match self.state.get(&task.name) {
-                None => {
-                    actions.push(ReconciliationAction::Create { task: task.clone() });
+        match self.tasks.get(&new_task.name) {
+            // Task is new and so are its containers.
+            None => {
+                for container in new_task.containers.iter() {
+                    // TODO: cloning strings, can this be avoided?
+                    containers_seen.insert(container.name.clone());
+                    actions.push(ReconciliationAction::Create {
+                        container: container.clone(),
+                    });
                 }
-                Some(entry) => {
-                    if task_desired_state_has_changed(&task, entry) {
-                        actions.push(ReconciliationAction::Recreate {
-                            container_id: entry.container_id.clone().unwrap(),
-                            task: task.clone(),
-                        });
+            }
+            Some(old_task) => {
+                let mut new_containers: HashMap<_, _> = new_task
+                    .containers
+                    .iter()
+                    .map(|container| (&container.name, container))
+                    .collect();
+
+                for old_container in old_task.containers.iter() {
+                    match new_containers.remove(&old_container.name) {
+                        None => {
+                            actions.push(ReconciliationAction::Remove {
+                                container_id: old_container.id().unwrap().to_owned(),
+                            });
+                        }
+                        Some(new_container) => {
+                            if container_desired_state_has_changed(
+                                &new_task,
+                                &new_container,
+                                &old_task,
+                                old_container,
+                            ) {
+                                actions.push(ReconciliationAction::Create {
+                                    container: new_container.clone(),
+                                });
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // Remove containers that are currently running but are not in the
-        // new specification.
-        for (container_name, container_entry) in self.state.iter() {
-            if !containers_seen.contains(container_name) {
-                actions.push(ReconciliationAction::Remove {
-                    container_id: container_entry.container_id.clone().unwrap(),
-                });
-            }
-        }
-
-        actions
+        Ok(actions)
     }
 
     #[tracing::instrument(name = "Worker::remove_container", skip_all, fields(
@@ -323,25 +368,25 @@ impl Worker {
             )
             .await?;
 
-        self.state.remove(container_name);
+        self.tasks.remove(container_name);
 
         Ok(())
     }
 
     #[tracing::instrument(name = "Worker::create_container", skip_all, fields(
-        task = ?task
+        container = ?container
     ))]
-    async fn create_container(&mut self, task: Task) -> Result<()> {
-        self.pull_image(&task.image)
+    async fn create_container(&mut self, container: resources_proto::Container) -> Result<()> {
+        self.pull_image(&container.image)
             .await
             .context("pulling image")?;
 
         let containers = self.docker_client.containers();
         let mut create_opts = ContainerCreateOpts::builder()
-            .image(&task.image)
-            .name(&task.name);
+            .image(&container.image)
+            .name(&container.name);
 
-        for port_binding in task.port_bindings.iter() {
+        for port_binding in container.port_bindings.iter() {
             let port_and_protocol = format!(
                 "{}/{}",
                 port_binding.port,
@@ -352,7 +397,7 @@ impl Worker {
             create_opts = create_opts.expose(PublishPort::from_str(&port_and_protocol)?, host_port);
         }
 
-        if let Err(_) = self.remove_container(&task.name).await { /* no-op */ }
+        if let Err(_) = self.remove_container(&container.name).await { /* no-op */ }
 
         let created_container = containers
             .create(&create_opts.build())
@@ -366,21 +411,15 @@ impl Worker {
             .await
             .context("starting container")?;
 
-        let local_task = LocalTask::running(created_container.id().to_string(), task);
-        self.state.insert(local_task.name.clone(), local_task);
         info!("container started");
 
-        Ok(())
-    }
+        if let Err(error) = self.build_state_from_existing_containers().await {
+            error!(
+                ?error,
+                "unable to build state from existing containers after creating new container"
+            );
+        }
 
-    #[tracing::instrument(name = "Worker::recreate_container", skip_all, fields(
-        container_id = %container_id,
-        task = ?task
-    ))]
-    async fn recreate_container(&mut self, container_id: &str, task: Task) -> Result<()> {
-        info!(?container_id, name = %task.name, "recreating container");
-        self.remove_container(container_id).await?;
-        self.create_container(task).await?;
         Ok(())
     }
 
@@ -404,82 +443,23 @@ impl Worker {
         Ok(())
     }
 
-    /// Stores the worker state in etcd so the manager can use it make decisions.
-    #[tracing::instrument(name = "Worker::store_current_state", skip_all)]
-    async fn store_current_state(&mut self) -> Result<()> {
-        let key = format!("workers/current_state/{}", self.config.id);
-
-        info!(?key, "storing worker state");
-
-        let current_state = worker_proto::CurrentState {
-            worker_id: self.config.id.to_string(),
-            hostname: self.node.hostname().unwrap_or_default(),
-            max_memory: self.node.max_memory(),
-            memory_allocated: self.node.memory_allocated(),
-            max_disk_size: self.node.max_disk_size(),
-            disk_allocated: self.node.disk_allocated(),
-            timestamp: Utc::now().timestamp_millis(),
-            tasks: self
-                .state
-                .iter()
-                .map(|(_, task)| worker_proto::Task::from(task.clone()))
-                .collect(),
-        };
-
-        let _ = self
-            .etcd
-            .put(PutRequest::new(key, current_state.encode_to_vec()))
-            .await?;
-
-        Ok(())
-    }
-
-    /// Returns the last known state of this node.
-    #[tracing::instrument(name = "Worker::get_current_state", skip_all)]
-    async fn get_current_state(&mut self) -> Result<Option<worker_proto::CurrentState>> {
-        let key = format!("workers/current_state/{}", self.config.id);
+    /// Returns the tasks assigned to this node by the scheduler.
+    #[tracing::instrument(name = "Worker::get_tasks_beloging_to_worker", skip_all)]
+    async fn get_tasks_beloging_to_worker(&mut self) -> Result<Vec<resources_proto::Task>> {
+        let key = format!("{WORKER_TASK_LIST_KEY}/{}", self.config.id);
 
         info!(?key, "fetching worker state");
 
-        let current_state = worker_proto::CurrentState {
-            worker_id: self.config.id.to_string(),
-            hostname: self.node.hostname().unwrap_or_default(),
-            max_memory: self.node.max_memory(),
-            memory_allocated: self.node.memory_allocated(),
-            max_disk_size: self.node.max_disk_size(),
-            disk_allocated: self.node.disk_allocated(),
-            timestamp: Utc::now().timestamp_millis(),
-            tasks: self
-                .state
-                .iter()
-                .map(|(_, task)| worker_proto::Task::from(task.clone()))
-                .collect(),
-        };
+        let range_response = self.etcd.get(KeyRange::prefix(key)).await?;
 
-        let range_response = self.etcd.get(KeyRange::key(key)).await?;
+        let mut tasks = Vec::with_capacity(range_response.kvs.len());
 
-        match range_response.kvs.first() {
-            None => Ok(None),
-            Some(kv) => {
-                let current_state = worker_proto::CurrentState::try_from(kv)?;
-                Ok(Some(current_state))
-            }
+        for kv in range_response.kvs {
+            let task = resources_proto::Task::try_from(kv)?;
+            tasks.push(task);
         }
-    }
-}
 
-impl TryFrom<docker_api::models::ContainerSummary> for LocalTask {
-    type Error = anyhow::Error;
-
-    fn try_from(input: docker_api::models::ContainerSummary) -> Result<Self, Self::Error> {
-        let container_name = input.names.expect("every container must have a name")[0].clone();
-
-        Ok(LocalTask {
-            container_id: input.id,
-            state: State::try_from(input.state.unwrap_or_default().as_ref())?.into(),
-            image: input.image.expect("image should exist"),
-            name: format_container_name(&container_name).to_owned(),
-        })
+        Ok(tasks)
     }
 }
 
@@ -490,15 +470,32 @@ pub fn format_container_name(name: &str) -> &str {
     name.strip_prefix("/").unwrap_or_default()
 }
 
+fn container_name(summary: &docker_api::models::ContainerSummary) -> String {
+    let container_name = &summary
+        .names
+        .as_ref()
+        .expect("every container must have a name")[0]
+        .clone();
+    format_container_name(&container_name).to_owned()
+}
+
 #[tracing::instrument(name = "worker::task_desired_state_has_changed", skip_all, fields(
-    desired_state = ?desired_state,
-    current_state = ?current_state,
+    new_container = ?new_container,
+    old_container = ?old_container,
     changed
 ))]
-fn task_desired_state_has_changed(desired_state: &Task, current_state: &LocalTask) -> bool {
-    let changed = (!current_state.is_running() && !current_state.is_completed())
-        || desired_state.name != current_state.name
-        || desired_state.image != current_state.image;
+fn container_desired_state_has_changed(
+    new_task: &Task,
+    new_container: &resources_proto::Container,
+    old_task: &Task,
+    old_container: &resources_proto::Container,
+) -> bool {
+    let changed = (old_container.is_completed() && new_task.timestamp > old_task.timestamp)
+        || (!old_container.is_running() && !old_container.is_completed())
+        || new_container.name != old_container.name
+        || new_container.image != old_container.image
+        || new_container.port_bindings != old_container.port_bindings
+        || new_container.resources != old_container.resources;
 
     tracing::Span::current().record("changed", changed);
 

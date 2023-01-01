@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package task;
+
+message Task {
+  string name = 1;
+  repeated Container containers = 2;
+  Node node = 3;
+  int64 timestamp = 4;
+}
+
+message Node {
+  string id = 1;
+}
+
+message Container {
+  string name = 1;
+  string image = 2;
+  repeated PortBinding port_bindings = 3;
+  Resources resources = 5;
+  Status status = 6;
+}
+
+message Status {
+  State state = 1;
+  string container_id = 2;
+}
+
+enum State {
+  pending = 0;
+  running = 1;
+  completed = 2;
+  failed = 3;
+  created = 4;
+}
+
+message PortBinding {
+  uint32 port = 1;
+  string protocol = 2;
+}
+
+message Resources {
+  ResourcesSpec requests = 1;
+  ResourcesSpec limits = 2;
+}
+
+message ResourcesSpec {
+  string memory = 1;
+  string cpu = 2;
+}
